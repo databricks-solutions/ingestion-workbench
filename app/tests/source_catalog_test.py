@@ -44,7 +44,7 @@ SUMMARY_TABLES = [
 def test_the_summary_recommends_what_the_engine_recommends_for_the_same_tables():
     discovery = _engine()
     tables, columns, keys = _catalog(SUMMARY_TABLES)
-    expected = [dict(row, size_mb=None) for row in discovery.assemble(tables, columns, keys)]
+    expected = discovery.assemble(tables, columns, keys)
     assert {row["load_type"] for row in expected} == {"ct", "cursor", "full"}
     # SQL Server gives the rows in no particular order, and assemble_summary sorts them the way assemble does.
     got = catalog.assemble_summary(list(reversed(_summary_rows(tables, columns, keys))))
@@ -91,9 +91,16 @@ def test_the_summary_joins_its_lists_with_for_xml_and_reads_only_catalog_views()
 
 
 def test_the_summary_names_each_output_column():
-    aliases = set(re.findall(r"\bAS (\w+)", _literals_blanked(catalog.TABLE_SUMMARY_SQL))) - {"BIGINT", "INT"}
-    assert aliases == {"sch", "tbl", "row_count", "ct_enabled", "select_cols", "excluded_cols", "pk_cols",
+    aliases = set(re.findall(r"\bAS (\w+)", _literals_blanked(catalog.TABLE_SUMMARY_SQL))) - {"BIGINT", "INT", "DECIMAL"}
+    assert aliases == {"sch", "tbl", "row_count", "size_mb", "ct_enabled", "select_cols", "excluded_cols", "pk_cols",
                        "pk_unreadable", "pk_first_type", "rowversion_col", "identity_col", "identity_type"}
+
+
+def test_the_summary_reads_each_tables_size_as_the_engines_discovery_does():
+    # A discovery through a UC connection needs the size for the partitioning recommendation, read the same way.
+    discovery = _engine()
+    size = re.search(r"CAST\(ISNULL\(\(SELECT SUM\(a\.total_pages\).*? AS size_mb", discovery.TABLES_SQL).group(0)
+    assert size in catalog.TABLE_SUMMARY_SQL
 
 
 def test_the_summary_leaves_out_microsoft_tables_and_lists_the_unsupported_types():
@@ -156,7 +163,7 @@ def _summary_rows(tables, columns, keys):
                            and column["is_nullable"] == 0), None)
         identity = next((column for column in readable if column["is_identity"] == 1), None)
         rows.append({
-            "sch": table["sch"], "tbl": table["tbl"], "row_count": table["row_count"],
+            "sch": table["sch"], "tbl": table["tbl"], "row_count": table["row_count"], "size_mb": table["size_mb"],
             "ct_enabled": table["ct_enabled"],
             "select_cols": _joined(column["col"] for column in readable),
             "excluded_cols": _joined(column["col"] for column in table_columns if _unreadable(column)),

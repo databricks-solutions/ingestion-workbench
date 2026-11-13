@@ -3369,20 +3369,11 @@ def upload_head_sql() -> str:
             f"order by line limit %s) l on true where u.upload_id = %s")
 
 
-def _partitioning_fields(t: str) -> str:
-    """The jsonb fields of a discovered table's partitioning, as recommended_partitioning gives it with the default
-    threshold and partition size: a table at least that large with a partition candidate loads partitioned on it; any
-    other gets no fields (a blank cell, so the job's default of no partitioning)."""
-    big = f"{t}.partition_candidate is not null and coalesce({t}.size_mb, 0) >= {DEFAULT_PARTITION_THRESHOLD_MB}"
-    return (f"'load_partitioned', case when {big} then 'true' end, "
-            f"'partition_col', case when {big} then {t}.partition_candidate end, "
-            f"'partition_size_mb', case when {big} then '{DEFAULT_PARTITION_SIZE_MB}' end")
-
-
 def source_rows_sql(kind: str) -> str:
     """The tables of an upload (its ok lines; param upload_id) or of discoveries (param: list of discovery ids; a
     table found by more than one, its latest finding), each with its server, database, schema, table, load type, and
-    what the CSV a plan reads takes from it: for an upload its line and fields, for a discovery its settings. The
+    what the CSV a plan reads takes from it: for an upload its line and fields, for a discovery its settings, with its
+    size and partition candidate for new_job to decide its partitioning (recommended_partitioning). The
     subquery the views and the selection read from."""
     if kind == "upload":
         return (f"select server, src_database, src_schema, src_table, load_type, null::text as cursor_column, "
@@ -3398,7 +3389,7 @@ def source_rows_sql(kind: str) -> str:
             f"'secret_key', case when d.src_connection is null then d.secret_key end, "
             f"'src_database', t.src_database, 'src_schema', t.src_schema, 'src_table', t.src_table, "
             f"'select_list', t.select_list, 'primary_key', t.primary_key, 'cursor_column', t.cursor_column, "
-            f"'load_type', t.load_type, {_partitioning_fields('t')}) as fields "
+            f"'load_type', t.load_type, 'size_mb', t.size_mb, 'partition_candidate', t.partition_candidate) as fields "
             f"from {SCHEMA}.discovered_table t join {SCHEMA}.discovery d "
             f"on d.discovery_id = t.discovery_id and d.src_database = t.src_database "
             f"where t.discovery_id = any(%s) "

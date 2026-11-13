@@ -1,11 +1,14 @@
-"""queries.source_rows_sql gives a discovered table the partitioning Bulk import's review recommends, against a real
-Postgres: at least DEFAULT_PARTITION_THRESHOLD_MB with a partition candidate is partitioned on it; anything else gets
-no partition fields. Skipped unless LAKEFED_APP_TEST_PG names a Postgres server (see monitoring_pg_test.py)."""
+"""A discovered table read by queries.source_rows_sql gets the partitioning Bulk import's review recommends once
+new_job plans it, against a real Postgres: the rows carry each table's size and partition candidate, and
+queries.recommended_partitioning (the one place the rule is kept) partitions a table of at least
+DEFAULT_PARTITION_THRESHOLD_MB with a candidate on it, and no other. Skipped unless LAKEFED_APP_TEST_PG names a
+Postgres server (see monitoring_pg_test.py)."""
 import os
 import sys
 import uuid
 from pathlib import Path
 
+import new_job as nj
 import pytest
 import queries as q
 
@@ -41,12 +44,19 @@ def pg():
         admin.close()
 
 
-def test_a_large_discovered_table_with_a_partition_column_carries_its_partitioning(pg):
+def test_a_large_discovered_table_with_a_partition_column_is_planned_partitioned(pg):
     from psycopg.rows import dict_row
     with pg.cursor(row_factory=dict_row) as cur:
         cur.execute(q.source_rows_sql("discovery"), (["d1"],))
-        found = {r["src_table"]: r["fields"] for r in cur.fetchall()}
-    partitioning = {t: (f.get("load_partitioned"), f.get("partition_col"), f.get("partition_size_mb")) for t, f in found.items()}
-    assert partitioning == {"big": ("true", "order_id", str(q.DEFAULT_PARTITION_SIZE_MB)),
+        rows = cur.fetchall()
+    found = {r["src_table"]: r["fields"] for r in rows}
+    assert found["big"]["partition_candidate"] == "order_id" and float(found["big"]["size_mb"]) == q.DEFAULT_PARTITION_THRESHOLD_MB
+    assert not any(c in f for f in found.values() for c in nj.PARTITION_COLUMNS)   # the rule is applied in Python only
+    plan = nj.plan("Sales", nj.csv_of(list(nj.DISCOVERY_COLUMNS), [r["fields"] for r in rows]),
+                   {"sink_catalog": "main", "sink_schema": "s", "sink_table": "{database}_{table}"}, 1)
+    assert plan["errors"] == []
+    partitioning = {line["row"]["src_table"]: (line["row"].get("load_partitioned"), line["row"].get("partition_col"),
+                                               line["row"].get("partition_size_mb")) for line in plan["lines"]}
+    assert partitioning == {"big": (True, "order_id", q.DEFAULT_PARTITION_SIZE_MB),
                             "big_no_column": (None, None, None), "small": (None, None, None),
                             "unknown_size": (None, None, None)}

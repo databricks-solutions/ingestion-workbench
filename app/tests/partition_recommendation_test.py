@@ -1,19 +1,20 @@
 """A job made from a discovery (New ingestion job, Add tables, re-discovery) loads a large table partitioned, as Bulk
 import's review recommends: a table of at least queries.DEFAULT_PARTITION_THRESHOLD_MB with a partition candidate
 gets load_partitioned on that column in partitions of DEFAULT_PARTITION_SIZE_MB. The rows reach new_job.plan as the
-discovery CSV (DISCOVERY_COLUMNS); queries.source_rows_sql fills the partition columns (partition_recommendation_pg_test)."""
+discovery CSV (DISCOVERY_COLUMNS) with each table's size and partition candidate (queries.source_rows_sql,
+partition_recommendation_pg_test), and new_job decides the partitioning by queries.recommended_partitioning."""
 import new_job as nj
 import queries as q
 
 PLAIN = {"sink_catalog": "main", "sink_schema": "s", "sink_table": "{database}_{table}"}
 
 
-def _discovered(table, partitioned=False, column="id"):
-    fields = {"src_connection": "sql_a", "src_database": "sales", "src_schema": "dbo", "src_table": table,
-              "select_list": "id, amount", "primary_key": "id", "load_type": "full"}
-    if partitioned:
-        fields.update(load_partitioned="true", partition_col=column, partition_size_mb=str(q.DEFAULT_PARTITION_SIZE_MB))
-    return fields
+def _discovered(table, large=False, column="id"):
+    """A discovered table's fields as source_rows_sql gives them: a large one at the threshold, a small one just under."""
+    size = q.DEFAULT_PARTITION_THRESHOLD_MB if large else q.DEFAULT_PARTITION_THRESHOLD_MB - 1
+    return {"src_connection": "sql_a", "src_database": "sales", "src_schema": "dbo", "src_table": table,
+            "select_list": "id, amount", "primary_key": "id", "load_type": "full", "size_mb": f"{size}.00",
+            "partition_candidate": column}
 
 
 def _rows(plan):
@@ -47,9 +48,17 @@ def test_re_discovery_and_add_tables_plan_the_same_partitioning_into_an_existing
     assert rows["big"][1:] == (True, "id", q.DEFAULT_PARTITION_SIZE_MB) and rows["small"][1:] == (None, None, None)
 
 
-def test_a_partitioned_recommendation_without_a_column_is_refused_by_the_row_check():
-    broken = dict(_discovered("big", True), partition_col="")
-    plan = nj.plan("Sales", nj.csv_of(list(nj.DISCOVERY_COLUMNS), [broken]), PLAIN, 1)
+def test_a_large_discovered_table_without_a_partition_candidate_or_a_size_is_not_partitioned():
+    no_column = dict(_discovered("big_no_column", True), partition_candidate=None)
+    no_size = dict(_discovered("unknown_size", True), size_mb=None)
+    plan = nj.plan("Sales", nj.csv_of(list(nj.DISCOVERY_COLUMNS), [no_column, no_size]), PLAIN, 1)
+    assert _rows(plan) == {"big_no_column": ("valid", None, None, None), "unknown_size": ("valid", None, None, None)}
+
+
+def test_a_line_marked_partitioned_without_a_column_is_refused_by_the_row_check():
+    columns = list(nj.DISCOVERY_COLUMNS) + list(nj.PARTITION_COLUMNS)
+    broken = dict(_discovered("big", True), load_partitioned="true", partition_col="", partition_size_mb="2048")
+    plan = nj.plan("Sales", nj.csv_of(columns, [broken]), PLAIN, 1)
     [line] = plan["lines"]
     assert line["status"] == "invalid" and "partitioned loads need partition_col and partition_size_mb" in line["errors"]
 
@@ -81,3 +90,10 @@ def test_a_tables_csv_upload_takes_the_partition_columns_per_line():
         "true", "id", "4096")
     plan = nj.plan("Sales", nj.csv_of(read["columns"], [line["fields"] for line in read["lines"]]), PLAIN, 1)
     assert _rows(plan) == {"big": ("valid", True, "id", 4096), "small": ("valid", None, None, None)}
+
+
+def test_a_line_that_gives_the_partition_columns_is_taken_as_written_over_the_recommendation():
+    columns = list(nj.DISCOVERY_COLUMNS) + list(nj.PARTITION_COLUMNS)
+    kept_whole = dict(_discovered("big", True), load_partitioned="false")
+    plan = nj.plan("Sales", nj.csv_of(columns, [kept_whole]), PLAIN, 1)
+    assert _rows(plan) == {"big": ("valid", None, None, None)}

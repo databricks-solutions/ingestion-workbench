@@ -203,8 +203,14 @@ def _line_load_types(text: str):
 
 
 def _partitioning(found: dict) -> Optional[dict]:
-    """A line's partitioning (load_partitioned, partition_col, partition_size_mb) from a discovered table's recommendation
-    (queries.recommended_partitioning's rule, in source_rows_sql), or None when it recommends none."""
+    """A line's partitioning (load_partitioned, partition_col, partition_size_mb), or None for none. A line that gives
+    the partition columns (a Tables CSV upload) is taken as written; a discovered table's comes from its size and
+    partition candidate by queries.recommended_partitioning, the one place the rule is kept."""
+    if not any(c in found for c in PARTITION_COLUMNS):
+        part, column, partition_size = q.recommended_partitioning(
+            found.get("size_mb"), found.get("partition_candidate"), q.DEFAULT_PARTITION_THRESHOLD_MB,
+            q.DEFAULT_PARTITION_SIZE_MB)
+        return {"load_partitioned": True, "partition_col": column, "partition_size_mb": partition_size} if part else None
     if not q._truthy(found.get("load_partitioned")):
         return None
     size = str(found.get("partition_size_mb") or "").strip()
@@ -241,9 +247,9 @@ def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int]
         out["errors"].append(f"groups per server must be from 1 to {MAX_GROUPS_PER_SERVER}")
     if out["errors"]:
         return out
-    # A discovered table carries discovery's load type and partitioning for it; a plain CSV has neither, and every line
-    # takes the job's load type and no partitioning. They're read here, not by config_import, which has no such columns.
-    text, extras = _line_columns(text, ("load_type",) + PARTITION_COLUMNS)
+    # A discovered table carries discovery's load type, size and partition candidate (its partitioning); a plain CSV has
+    # neither, and every line takes the job's load type and no partitioning. They're read here, not by config_import, which has no such columns.
+    text, extras = _line_columns(text, ("load_type",) + PARTITION_COLUMNS + RECOMMENDATION_COLUMNS)
     line_types = {line: found["load_type"] for line, found in extras.items() if found.get("load_type")}
     # The file is read as Import CSV reads it; its sink names are made again below, with the job's templates.
     read = ci.plan_import(text, "_new", {"src_type": settings["src_type"], "load_type": settings["load_type"],
@@ -505,10 +511,12 @@ def csv_of(columns: List[str], rows: List[dict]) -> str:
     return out.getvalue()
 
 
-# A discovered table's partitioning, as discovery recommends it (queries.source_rows_sql); not a column of the import.
+# A line's partitioning as a Tables CSV upload gives it; not a column of the import.
 PARTITION_COLUMNS = ("load_partitioned", "partition_col", "partition_size_mb")
+# What a discovered table's partitioning is decided from (queries.source_rows_sql gives them, _partitioning decides).
+RECOMMENDATION_COLUMNS = ("size_mb", "partition_candidate")
 DISCOVERY_COLUMNS = ("src_connection", "src_host", "src_port", "secret_key", "src_database", "src_schema", "src_table",
-                     "select_list", "primary_key", "cursor_column", "load_type") + PARTITION_COLUMNS
+                     "select_list", "primary_key", "cursor_column", "load_type") + RECOMMENDATION_COLUMNS
 
 
 NO_TABLES = "the selection takes no tables"
