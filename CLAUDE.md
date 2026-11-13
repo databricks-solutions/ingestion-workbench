@@ -29,7 +29,8 @@ own directory.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install pytest            # unit tests need nothing else; tests/validation_test.py also needs pytds
+pip install --require-hashes -r requirements-ci.txt   # CI's hash-locked install; tests/validation_test.py also needs pytds
+(cd app/src && npm ci)        # the frontend tests' packages
 ```
 
 ### Run Tests
@@ -39,6 +40,12 @@ pytest tests                             # default version
 pytest tests/planner_test.py::test_name  # single test
 pytest job_orchestration/tests           # job orchestration version
 ```
+CI (`.github/workflows/tests.yml`) runs the whole suite on every pull request (Python 3.11 and 3.12, a throwaway
+Postgres 16 with SSL for the `*_pg_test.py` suites, and `npm run check`); once the check is added to the
+`protect_main` ruleset, a pull request must pass it to merge into main. It installs only `requirements-ci.txt` (hash-locked,
+compiled by `uv pip compile` from `app/src/requirements.txt` and `requirements-test.in`; recompile it after changing
+either) and pins the Postgres image by digest. Dependabot (`.github/dependabot.yml`) and CODEOWNERS (`.github/`, the
+requirements and the npm lockfile) cover the rest.
 
 ### Deploy
 ```bash
@@ -90,6 +97,9 @@ secret). See `README.md`, `docs/deploy.md`, `docs/monitoring.md`, `docs/lakebase
   instance label) and one per ingestion group, rewritten in the same transaction as the rows they count (the engine
   after each database's work, the app after its own edits). The pages read them, so counts are never scanned from
   control; a grain with no control row left is zeroed (`control_rows = 0`), not deleted. See `docs/lakebase_schema.md`.
+- Every table and column has a description in `src/lakefed_ingest/lakebase_comments.sql` (`COMMENT ON`), which Unity
+  Catalog shows for Genie; the setup job applies it on every run (`StateStore.apply_comments`) and describes each table
+  through `lakebase_catalog`. A new table or column needs one (`tests/lakebase_comments_pg_test.py`); no schema version.
 - DDL is applied by `StateStore.migrate` (from `apply_lakebase_schema.ipynb`, and from `ingest.ipynb`
   when `schema_version` is behind `state_store.SCHEMA_VERSION`, so upgrades are deploy-only): one
   transaction, split on `;`, no `DO $$` blocks, no `CREATE INDEX CONCURRENTLY`. Migrations must be
@@ -131,7 +141,9 @@ secret). See `README.md`, `docs/deploy.md`, `docs/monitoring.md`, `docs/lakebase
   With `runs_by` `changes` (`group`, the default until its lab proof, keeps one run per collection with work)
   the cycle is shared out by its changes (`initial_check.plan_cycle`, `launcher.cycle_requests`): each database's
   tables with work (`check_collection`'s `weights`), as many runs as those tables over the job's group size (its tables over its
-  groups, `group_size_of`), each database whole on one run, a collection with a first load on a run of its own.
+  groups, `group_size_of`), each collection's part of a database whole on one run (a database split over collections
+  is one part per collection, checked, locked and stamped per collection), a collection with a first load on a run of
+  its own.
   The check then holds each collection shared and each database it checks exclusively (`share_locks`), leaving out
   the databases a run still holds; a database a run going was given waits for it (`deferred`). A run spanning
   collections gets `task_collection` blank and its `work_id`: `ingest.ipynb` takes its collections in turn on its
