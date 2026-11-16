@@ -202,20 +202,34 @@ def _line_load_types(text: str):
     return plain, {line: found["load_type"] for line, found in values.items()}
 
 
-def _partitioning(found: dict) -> Optional[dict]:
-    """A line's partitioning (load_partitioned, partition_col, partition_size_mb), or None for none. A line that gives
-    the partition columns (a Tables CSV upload) is taken as written; a discovered table's comes from its size and
-    partition candidate by queries.recommended_partitioning, the one place the rule is kept."""
-    if not any(c in found for c in PARTITION_COLUMNS):
-        part, column, partition_size = q.recommended_partitioning(
-            found.get("size_mb"), found.get("partition_candidate"), q.DEFAULT_PARTITION_THRESHOLD_MB,
-            q.DEFAULT_PARTITION_SIZE_MB)
-        return {"load_partitioned": True, "partition_col": column, "partition_size_mb": partition_size} if part else None
-    if not q._truthy(found.get("load_partitioned")):
-        return None
+def _partitioning(found: dict) -> Tuple[Optional[dict], List[str]]:
+    """A line's partitioning (load_partitioned, partition_col, partition_size_mb) from its partition columns, or None
+    for none, and why the columns can't be taken. A blank load_partitioned with a column or size given, a word that
+    isn't true or false, or a size that isn't a whole number is refused, never read as no partitioning. (A discovered
+    table's columns are written by csv_of, from its recommendation.)"""
+    flag = str(found.get("load_partitioned") or "").strip()
+    column = str(found.get("partition_col") or "").strip() or None
     size = str(found.get("partition_size_mb") or "").strip()
-    return {"load_partitioned": True, "partition_col": found.get("partition_col") or None,
-            "partition_size_mb": int(size) if size.isdigit() else None}
+    if not flag:
+        if column or size:
+            return None, ["load_partitioned is blank: set it to true to partition on partition_col, or leave "
+                          "partition_col and partition_size_mb blank"]
+        return None, []
+    try:
+        partitioned = q.parse_bool(flag)
+    except ValueError:
+        return None, [f"load_partitioned must be true or false, not {flag!r}"]
+    if not partitioned:
+        return None, []
+    if size and not size.isdigit():
+        return None, [f"partition_size_mb must be a whole number of MB, not {size!r}"]
+    return {"load_partitioned": True, "partition_col": column, "partition_size_mb": int(size) if size else None}, []
+
+
+def _repeated(text: str, names) -> List[str]:
+    """The columns among names the file's header gives more than once (config_import refuses the rest)."""
+    header = [h.strip() for h in next(csv.reader(io.StringIO(text.lstrip("\ufeff"))), [])]
+    return [f"column {c} is given twice" for c in names if header.count(c) > 1]
 
 
 def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int] = None,
@@ -247,9 +261,14 @@ def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int]
         out["errors"].append(f"groups per server must be from 1 to {MAX_GROUPS_PER_SERVER}")
     if out["errors"]:
         return out
-    # A discovered table carries discovery's load type, size and partition candidate (its partitioning); a plain CSV has
-    # neither, and every line takes the job's load type and no partitioning. They're read here, not by config_import, which has no such columns.
-    text, extras = _line_columns(text, ("load_type",) + PARTITION_COLUMNS + RECOMMENDATION_COLUMNS)
+    # A discovered table carries discovery's load type and partitioning (csv_of decides it); a plain CSV has neither,
+    # and every line takes the job's load type and no partitioning. They're read here, not by config_import, which has
+    # no such columns.
+    repeated = _repeated(text, ("load_type",) + PARTITION_COLUMNS)
+    if repeated:
+        out["errors"] = repeated
+        return out
+    text, extras = _line_columns(text, ("load_type",) + PARTITION_COLUMNS)
     line_types = {line: found["load_type"] for line, found in extras.items() if found.get("load_type")}
     # The file is read as Import CSV reads it; its sink names are made again below, with the job's templates.
     read = ci.plan_import(text, "_new", {"src_type": settings["src_type"], "load_type": settings["load_type"],
@@ -276,7 +295,8 @@ def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int]
             row["load_type"] = line_types[line["line"]]
             if row["load_type"] not in LOAD_TYPES:
                 problems.append(f"load_type must be one of {', '.join(LOAD_TYPES)}")
-        partitioning = _partitioning(extras.get(line["line"], {}))
+        partitioning, partition_errors = _partitioning(extras.get(line["line"], {}))
+        problems += partition_errors
         if partitioning:
             row.update(partitioning)
         server = js.server_of(row)
@@ -433,6 +453,7 @@ def read_upload(text: str, connection: str, max_lines: int = MAX_LINES) -> dict:
     # load_type and the partition columns are per-line extras the plan reads itself (_line_columns), not the import's.
     extras = ("load_type",) + PARTITION_COLUMNS
     errors = ci._header_errors([h for h in header if h not in extras]) if header else ["the file is empty"]
+    errors += [f"column {c} is given twice" for c in extras if header.count(c) > 1]
     errors += [f"column {c} is not accepted: the file reads through the connection chosen before it, and the job sets "
                f"its groups" for c in header if c in UPLOAD_REFUSED_COLUMNS]
     if header and "src_database" not in header:
@@ -503,20 +524,38 @@ def table_key(row: dict) -> tuple:
 
 
 def csv_of(columns: List[str], rows: List[dict]) -> str:
-    """The CSV a plan reads: the columns, then each row's fields in their order."""
+    """The CSV a plan reads: the columns, then each row's fields in their order (a discovered table's with its
+    partitioning decided, plan_fields)."""
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(columns)
-    writer.writerows([[("" if row.get(c) is None else row.get(c)) for c in columns] for row in rows])
+    writer.writerows([[("" if row.get(c) is None else row.get(c)) for c in columns] for row in map(plan_fields, rows)])
     return out.getvalue()
 
 
-# A line's partitioning as a Tables CSV upload gives it; not a column of the import.
+def plan_fields(fields: dict) -> dict:
+    """A source row's fields as a plan reads them. A discovered table's (queries.source_rows_sql gives it a size and a
+    partition candidate) get the partition columns queries.recommended_partitioning decides, the one place the rule is
+    kept, unless they give them already; the size and candidate aren't columns. An upload's are as written."""
+    if not any(k in fields for k in RECOMMENDATION_INPUTS):
+        return fields
+    out = {k: v for k, v in fields.items() if k not in RECOMMENDATION_INPUTS}
+    if any(str(out.get(c) or "").strip() for c in PARTITION_COLUMNS):
+        return out
+    part, column, size = q.recommended_partitioning(fields.get("size_mb"), fields.get("partition_candidate"),
+                                                    q.DEFAULT_PARTITION_THRESHOLD_MB, q.DEFAULT_PARTITION_SIZE_MB)
+    if part:
+        out.update(load_partitioned="true", partition_col=column, partition_size_mb=str(size))
+    return out
+
+
+# A line's partitioning: a Tables CSV upload's as written, a discovered table's as csv_of decides it. Not a column of
+# the import.
 PARTITION_COLUMNS = ("load_partitioned", "partition_col", "partition_size_mb")
-# What a discovered table's partitioning is decided from (queries.source_rows_sql gives them, _partitioning decides).
-RECOMMENDATION_COLUMNS = ("size_mb", "partition_candidate")
+# What a discovered table's partitioning is decided from (queries.source_rows_sql gives them; never a CSV column).
+RECOMMENDATION_INPUTS = ("size_mb", "partition_candidate")
 DISCOVERY_COLUMNS = ("src_connection", "src_host", "src_port", "secret_key", "src_database", "src_schema", "src_table",
-                     "select_list", "primary_key", "cursor_column", "load_type") + RECOMMENDATION_COLUMNS
+                     "select_list", "primary_key", "cursor_column", "load_type") + PARTITION_COLUMNS
 
 
 NO_TABLES = "the selection takes no tables"

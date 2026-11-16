@@ -1464,8 +1464,16 @@ def validate_control_row(row: dict) -> List[str]:
         errs.append(f"load_type {lt} is only supported for src_type sqlserver")
     if "*" in str(row.get("select_list") or ""):
         errs.append("select_list must list explicit columns (* isn't supported)")
-    if row.get("load_partitioned") and (not row.get("partition_col") or not row.get("partition_size_mb")):
+    if row.get("load_partitioned") and (not row.get("partition_col") or row.get("partition_size_mb") in (None, "")):
         errs.append("partitioned loads need partition_col and partition_size_mb")
+    elif row.get("load_partitioned"):
+        try:
+            size_ok = MIN_PARTITION_SIZE_MB <= int(row["partition_size_mb"]) <= MAX_PARTITION_SIZE_MB
+        except (TypeError, ValueError):
+            size_ok = False
+        if not size_ok:
+            errs.append(f"partition_size_mb must be a whole number from {MIN_PARTITION_SIZE_MB} to "
+                        f"{MAX_PARTITION_SIZE_MB:,} (MB)")
     sla = row.get("freshness_sla_minutes")
     if sla not in (None, ""):
         try:
@@ -1528,6 +1536,9 @@ def control_params(row: dict) -> tuple:
 # tables whose single read outlasts the rest of a run: about 10 GB and up at the rates measured (a few MB/s per read).
 DEFAULT_PARTITION_THRESHOLD_MB = 10240
 DEFAULT_PARTITION_SIZE_MB = 2048
+# A partition size the row check takes: at most 1 TB, well inside the control column's int, so a mistyped size is
+# refused instead of failing the whole write.
+MIN_PARTITION_SIZE_MB, MAX_PARTITION_SIZE_MB = 1, 1048576
 
 
 def discoveries_sql() -> str:

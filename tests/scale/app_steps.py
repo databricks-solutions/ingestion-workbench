@@ -416,10 +416,8 @@ def _upload_text(text: str, lines_hint: Optional[int]) -> UploadRun:
 
 def _upload_columns() -> List[str]:
     """The discovery columns an upload takes: the file reads through the connection chosen before it, so not the
-    server's own columns (new_job.UPLOAD_REFUSED_COLUMNS), and it gives a line's partitioning as written
-    (new_job.PARTITION_COLUMNS), not the size and candidate a discovery decides it from."""
-    return [c for c in nj.DISCOVERY_COLUMNS if c not in nj.UPLOAD_REFUSED_COLUMNS + nj.RECOMMENDATION_COLUMNS] + list(
-        nj.PARTITION_COLUMNS)
+    server's own columns (new_job.UPLOAD_REFUSED_COLUMNS)."""
+    return [c for c in nj.DISCOVERY_COLUMNS if c not in nj.UPLOAD_REFUSED_COLUMNS]
 
 
 def _repeated_csv(line_count: int, columns: Optional[List[str]] = None) -> str:

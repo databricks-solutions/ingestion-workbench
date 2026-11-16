@@ -1,8 +1,9 @@
 """A job made from a discovery (New ingestion job, Add tables, re-discovery) loads a large table partitioned, as Bulk
 import's review recommends: a table of at least queries.DEFAULT_PARTITION_THRESHOLD_MB with a partition candidate
 gets load_partitioned on that column in partitions of DEFAULT_PARTITION_SIZE_MB. The rows reach new_job.plan as the
-discovery CSV (DISCOVERY_COLUMNS) with each table's size and partition candidate (queries.source_rows_sql,
-partition_recommendation_pg_test), and new_job decides the partitioning by queries.recommended_partitioning."""
+discovery CSV (DISCOVERY_COLUMNS): queries.source_rows_sql gives each table's size and partition candidate
+(partition_recommendation_pg_test), and new_job.csv_of writes the partition columns queries.recommended_partitioning
+decides. A CSV a user gives (pasted or uploaded) sets the partition columns itself, checked strictly."""
 import new_job as nj
 import queries as q
 
@@ -56,7 +57,7 @@ def test_a_large_discovered_table_without_a_partition_candidate_or_a_size_is_not
 
 
 def test_a_line_marked_partitioned_without_a_column_is_refused_by_the_row_check():
-    columns = list(nj.DISCOVERY_COLUMNS) + list(nj.PARTITION_COLUMNS)
+    columns = list(nj.DISCOVERY_COLUMNS)
     broken = dict(_discovered("big", True), load_partitioned="true", partition_col="", partition_size_mb="2048")
     plan = nj.plan("Sales", nj.csv_of(columns, [broken]), PLAIN, 1)
     [line] = plan["lines"]
@@ -93,7 +94,64 @@ def test_a_tables_csv_upload_takes_the_partition_columns_per_line():
 
 
 def test_a_line_that_gives_the_partition_columns_is_taken_as_written_over_the_recommendation():
-    columns = list(nj.DISCOVERY_COLUMNS) + list(nj.PARTITION_COLUMNS)
+    columns = list(nj.DISCOVERY_COLUMNS)
     kept_whole = dict(_discovered("big", True), load_partitioned="false")
     plan = nj.plan("Sales", nj.csv_of(columns, [kept_whole]), PLAIN, 1)
     assert _rows(plan) == {"big": ("valid", None, None, None)}
+
+
+USER_HEADER = "src_connection,src_database,src_schema,src_table,select_list,primary_key"
+
+
+def _user_plan(extra_header: str, extra_cells: str):
+    return nj.plan("Sales", f"{USER_HEADER},{extra_header}\nsql_a,sales,dbo,t,\"id, amount\",id,{extra_cells}\n", PLAIN, 1)
+
+
+def test_a_csv_a_user_gives_cant_carry_a_size_or_candidate():
+    # Only a discovered row's fields carry them (csv_of turns them into the partition columns); in a user's CSV they
+    # are unknown columns, as before, never read (a bad size once crashed the plan).
+    for cells in ("big,id", "99999,id"):
+        plan = _user_plan("size_mb,partition_candidate", cells)
+        assert plan["errors"] == ["unknown column size_mb", "unknown column partition_candidate"]
+
+
+def test_csv_of_writes_a_discovered_tables_partition_columns_and_leaves_an_uploads_as_written():
+    big = nj.plan_fields(_discovered("big", True, "order_id"))
+    assert (big["load_partitioned"], big["partition_col"], big["partition_size_mb"]) == (
+        "true", "order_id", str(q.DEFAULT_PARTITION_SIZE_MB))
+    assert not any(k in big for k in nj.RECOMMENDATION_INPUTS)
+    small = nj.plan_fields(_discovered("small"))
+    assert not any(small.get(c) for c in nj.PARTITION_COLUMNS) and not any(k in small for k in nj.RECOMMENDATION_INPUTS)
+    upload = {"src_database": "sales", "load_partitioned": "true", "partition_col": "id", "partition_size_mb": "4096"}
+    assert nj.plan_fields(upload) is upload
+
+
+def test_a_mistyped_load_partitioned_is_refused_not_read_as_false():
+    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "ture,id,2048")["lines"]
+    assert line["status"] == "invalid" and "load_partitioned must be true or false, not 'ture'" in line["errors"]
+    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "on,id,2048")["lines"]
+    assert line["status"] == "valid" and line["row"]["load_partitioned"] is True
+
+
+def test_a_partition_column_or_size_with_a_blank_load_partitioned_is_refused():
+    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", ",id,4096")["lines"]
+    assert line["status"] == "invalid" and any(e.startswith("load_partitioned is blank") for e in line["errors"])
+    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "false,id,4096")["lines"]
+    assert line["status"] == "valid" and line["row"].get("load_partitioned") is None
+
+
+def test_a_partition_size_must_be_a_whole_number_within_bounds():
+    for size, message in (("2048.0", "partition_size_mb must be a whole number of MB, not '2048.0'"),
+                          ("3000000000", "partition_size_mb must be a whole number from 1 to 1,048,576 (MB)"),
+                          ("0", "partition_size_mb must be a whole number from 1 to 1,048,576 (MB)")):
+        [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", f"true,id,{size}")["lines"]
+        assert line["status"] == "invalid" and message in line["errors"], (size, line["errors"])
+    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "true,id,1048576")["lines"]
+    assert line["status"] == "valid"
+
+
+def test_a_partition_column_given_twice_is_refused():
+    plan = _user_plan("load_partitioned,load_partitioned,partition_col,partition_size_mb", "true,false,id,2048")
+    assert plan["errors"] == ["column load_partitioned is given twice"]
+    text = f"{USER_HEADER},load_partitioned,load_partitioned\nsql_a,sales,dbo,t,id,id,true,false\n"
+    assert "column load_partitioned is given twice" in nj.read_upload(text, "sql_a")["errors"]

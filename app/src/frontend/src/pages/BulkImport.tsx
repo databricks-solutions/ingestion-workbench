@@ -19,7 +19,9 @@ const theme = gridTheme;
 
 interface Shared {
   sink_catalog: string; sink_schema: string; sink_table: string; client_id: string;
-  freshness_sla_minutes: number | null; partition_threshold_mb: number; partition_size_mb: number; include_default: boolean;
+  freshness_sla_minutes: number | null; include_default: boolean;
+  // Unset until typed: the request then leaves them out and the server uses its defaults (config.defaults shows them).
+  partition_threshold_mb?: number; partition_size_mb?: number;
 }
 
 interface Connection { name: string; connection_type: string; host?: string; port?: string; owner?: string; discoverable: boolean;
@@ -162,8 +164,7 @@ export default function BulkImport() {
   const locked = groupsRefusal(usePermissions().data, [collection.trim()]);
   const [shared, setShared] = useState<Shared>({
     sink_catalog: "main", sink_schema: "bronze_{database}", sink_table: "{table}", client_id: "", freshness_sla_minutes: null,
-    partition_threshold_mb: config?.defaults.partition_threshold_mb ?? 10240,
-    partition_size_mb: config?.defaults.partition_size_mb ?? 2048, include_default: true,
+    include_default: true,
   });
   const review = useQuery({
     queryKey: ["review", did, shared, progress, collection.trim()],
@@ -278,11 +279,11 @@ export default function BulkImport() {
               <span className="muted small">a table is late when its last success is older than this</span>
             </label>
             <label>Partition tables larger than (MB)
-              <input type="number" min={1} value={shared.partition_threshold_mb}
+              <input type="number" min={1} value={shared.partition_threshold_mb ?? config?.defaults.partition_threshold_mb ?? ""}
                 onChange={(e) => setShared({ ...shared, partition_threshold_mb: Number(e.target.value) || 1 })} />
             </label>
             <label>partition_size_mb
-              <input type="number" min={1} value={shared.partition_size_mb}
+              <input type="number" min={1} value={shared.partition_size_mb ?? config?.defaults.partition_size_mb ?? ""}
                 onChange={(e) => setShared({ ...shared, partition_size_mb: Number(e.target.value) || 1 })} />
             </label>
             <label className="checkbox"><input type="checkbox" checked={shared.include_default}
