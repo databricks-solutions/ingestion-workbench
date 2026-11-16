@@ -89,13 +89,14 @@ def test_a_large_create_is_written_by_its_task_in_batches_once(client):
     print(f"2,500-table create through the task on a local Postgres: {took:.2f} s")
 
 
-def test_a_taken_target_fails_the_task_and_writes_nothing(client):
-    assert _create(client, "small", name="First", csv=_csv(1, 3)).status_code == 200
-    r = _create(client, "big", name="Second", csv=_csv(3, 300))   # eng_000.t0000..t0002 are First's targets
-    task = client.get(f"/api/tasks/{r.json()['task']['id']}").json()
-    assert task["status"] == "failed" and (
-        "another table already writes main.eng.t0000 for database eng_000 on sql_a" in task["error"])
-    assert task["result"] is None
+def test_a_database_another_job_reads_into_the_same_schema_refuses_the_create_and_writes_nothing(client):
+    first = _create(client, "small", name="First", csv=_csv(1, 3))
+    assert first.status_code == 200
+    r = _create(client, "big", name="Second", csv=_csv(3, 300))   # eng_000 is First's, into the same main.eng
+    assert r.status_code == 409, r.text                            # the shared-database rule, before any task starts
+    assert "database eng_000 is also in the ingestion job First, which writes to main.eng too" in r.json()["detail"][
+        "message"]
+    assert r.json()["detail"]["jobs"] == [{"id": first.json()["id"], "name": "First"}]
     assert client.sql("select name from lakefed_ingest.schedule") == [("First",)]
     assert client.sql("select count(*) from lakefed_ingest.control") == [(3,)]
 

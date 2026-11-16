@@ -909,17 +909,32 @@ def test_restore_is_refused_when_one_of_its_groups_is_now_in_another_live_job(ap
     assert api.store.schedules[sid]["deleted_at"] is not None
 
 
-def test_restore_is_refused_when_a_live_job_shares_a_database_or_a_target_table(api):
+def test_restore_is_refused_when_a_live_job_writes_one_of_its_target_tables(api):
     sid = api.post("/api/schedules", json=BODY).json()["id"]
     _delete_job(api, sid)
-    api.store.conflicts = [("database", "sales_db", "Other")]
+    api.store.conflicts = [("main.sales.fan_in", "Other")]
     r = api.post(f"/api/schedules/{sid}/restore")
     assert r.status_code == 409
-    assert "database sales_db is also read or written by the live ingestion job Other" in r.json()["detail"]
-    api.store.conflicts = [("target", "main.sales.fan_in", "Other")]
-    r = api.post(f"/api/schedules/{sid}/restore")
-    assert r.status_code == 409 and "target table main.sales.fan_in" in r.json()["detail"]
+    assert "target table main.sales.fan_in is also written by the live ingestion job Other" in r.json()["detail"]
     assert api.store.schedules[sid]["deleted_at"] is not None
+
+
+def test_restore_checks_the_shared_database_rule_over_its_groups_once_they_are_live_again(api, monkeypatch):
+    sid = api.post("/api/schedules", json=BODY).json()["id"]
+    _delete_job(api, sid)
+    checked = []
+
+    def clash(cur, groups, rows=None, ids=(), *, confirm_shared):
+        checked.append((sorted(groups), rows, confirm_shared))
+        raise main.HTTPException(409, {"message": "database sales_db is also in the ingestion job Other, which writes "
+                                                  "to main.sales too", "jobs": [{"id": 9, "name": "Other"}]})
+
+    monkeypatch.setattr(main, "_refuse_shared_targets", clash)
+    r = api.post(f"/api/schedules/{sid}/restore")
+    assert r.status_code == 409 and r.json()["detail"]["jobs"] == [{"id": 9, "name": "Other"}]
+    assert checked == [(sorted(BODY["members"]), None, False)]     # every row of its groups, as they come back
+    # The check runs inside Restore's transaction once the job is live again, so a refusal rolls the Restore back
+    # (this fake store keeps the statements it ran, so the rollback itself is shown in restore_pg_test.py).
 
 
 def test_new_tables_in_a_database_a_kept_deleted_job_reads_are_refused_before_anything_is_written():

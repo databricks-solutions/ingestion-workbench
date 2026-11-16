@@ -5,6 +5,7 @@ import { api, qs, type Row } from "../api";
 import { Cols, Cut, ErrorBox, Info, Notice, OutLink, PageHead, Pager, RunStatus, Section, Twisty, fmtInt, oneLine, fmtShort, fmtTime, toast, useConfirm,
          usePageStamp, type Outcome } from "../components";
 import { daysLeftText } from "../pending";
+import { useSharedConfirm } from "../sharedSources";
 import { deleteNowRequest } from "./IngestionJob";
 import { JobsTable, type JobSort } from "./Overview";
 
@@ -79,8 +80,11 @@ function Deletions() {
   // A restored or purged job leaves this list, and it changes the jobs list and the job's own page.
   const refresh = () => ["ingestion-job-deletions", "schedules", "ingestion-jobs", "ingestion-job"]
     .forEach((key) => qc.invalidateQueries({ queryKey: [key] }));
+  // A job that reads databases a live job reads now is asked about first, as Create asks.
+  const askShared = useSharedConfirm();
   const restore = useMutation({
-    mutationFn: (id: string) => api.post<Row>(`/schedules/${encodeURIComponent(id)}/restore`),
+    mutationFn: (id: string) => askShared.send((confirmShared) =>
+      api.post<Row>(`/schedules/${encodeURIComponent(id)}/restore${confirmShared ? "?confirm_shared=true" : ""}`)),
     onSuccess: () => { toast("Restored paused"); setOffset(0); refresh(); },
   });
   const purge = useMutation({
@@ -95,6 +99,7 @@ function Deletions() {
       Delete now deletes one at once.</Info></span>;
   return (
     <Section title={title}>
+      {askShared.dialog}
       <ErrorBox error={page.error} />
       {open && <>
         {page.data && <p className="muted small">Kept for {page.data.retention_days} days after Delete, then deleted for good.

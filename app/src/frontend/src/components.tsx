@@ -633,13 +633,19 @@ export function PageHead({ title, lead, crumb, right, tab }: { title: ReactNode;
   );
 }
 
+/** An error as the Databricks UI shows one: a red alert with the server's words, its hint, and a link to each ingestion
+ *  job a refusal names (its detail's jobs, as the shared-database rule gives them). */
 export function ErrorBox({ error }: { error: unknown }) {
   if (!error) return null;
   const e = error as ApiError;
+  const jobs: Row[] = Array.isArray(e.detail?.jobs) ? e.detail.jobs : [];
   return (
     <div className="alert bad">
       <strong>Error:</strong> {e.message ?? String(error)}
       {e.hint && <div className="hint">{e.hint}</div>}
+      {jobs.map((job) => (
+        <div className="hint" key={job.id}>Open ingestion job <Link to={`/ingestion-jobs/${job.id}`}>{job.name}</Link></div>
+      ))}
     </div>
   );
 }

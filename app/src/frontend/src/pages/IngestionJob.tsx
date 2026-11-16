@@ -14,6 +14,7 @@ import { FailingTables } from "./FailingTables";
 import { RunNowDialog } from "./RunNowDialog";
 import { RunningTasks } from "./tasks";
 import { Busy, Cols, Cut, CutCopy, Info, Spinner, OutLink, Crumbs, Badge, ErrorBox, Menu, Modal, Notice, oneLine, PageHead, StatusLine, toast, ProgressBar, RunStatus, Section, StateSummary, WriteWarnings, fmtClock, fmtDuration, fmtInt, fmtShort, fmtSlot, fmtSpeed, fmtTime, jobRunPath, plural, progressFrom, useConfirm, usePageStamp, type ConfirmRequest, Twisty } from "../components";
+import { useSharedConfirm } from "../sharedSources";
 
 const PAGE = 25;
 /** An ingestion run list's columns, as a job's runs list keeps its own: the run's time, then fixed narrow fields; the job
@@ -330,8 +331,11 @@ export default function IngestionJob() {
     onSuccess: () => { toast("Deleting the job"); qc.invalidateQueries(); },
   });
   // A deleted job: Restore brings it back paused, and Delete now runs its purge at once.
+  // A job that reads databases a live job reads now is asked about first, as Create asks.
+  const askShared = useSharedConfirm();
   const restore = useMutation({
-    mutationFn: () => api.post<Row>(`/schedules/${encodeURIComponent(id)}/restore`),
+    mutationFn: () => askShared.send((confirmShared) =>
+      api.post<Row>(`/schedules/${encodeURIComponent(id)}/restore${confirmShared ? "?confirm_shared=true" : ""}`)),
     onSuccess: () => { toast("Restored paused"); qc.invalidateQueries(); },
   });
   const purge = useMutation({
@@ -369,6 +373,7 @@ export default function IngestionJob() {
   const deletion = deleteNotice(j?.delete, fmtShort(j?.delete?.expires_at));
   return (
     <>
+      {askShared.dialog}
       <PageHead crumb={<Crumbs steps={[["Ingestion jobs", "/ingestion-jobs"]]} />} tab={j?.name}
         title={j ? <>{j.name} {j.prepare && j.prepare.state !== "ready"
           ? <Badge value={j.prepare.state === "needs_you" ? "Needs you" : "Preparing"} />

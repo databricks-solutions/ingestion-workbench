@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { SOURCE_TYPE_NAMES } from "../cells";
 import { PageHead, ErrorBox, Section, ToastOn, WriteWarnings } from "../components";
+import { useSharedConfirm } from "../sharedSources";
 import { groupsRefusal, usePermissions } from "../permissions";
 
 // The values in words, as the Edit view names them.
@@ -48,18 +49,22 @@ export default function AddTable() {
   const [row, setRow] = useState<Record<string, any>>(initial);
   const locked = groupsRefusal(usePermissions().data, [row.task_collection]);
   const qc = useQueryClient();
+  // A table of a database another live job reads is asked about first, as Create asks.
+  const shared = useSharedConfirm();
   const add = useMutation({
-    mutationFn: () => api.post<{ id: number; warnings?: Record<string, any>[] }>("/tables", {
+    mutationFn: () => shared.send((confirmShared) => api.post<{ id: number; warnings?: Record<string, any>[] }>("/tables", {
       ...row,
       src_port: row.src_port === "" ? null : Number(row.src_port),
       partition_size_mb: row.partition_size_mb === "" ? null : Number(row.partition_size_mb),
       freshness_sla_minutes: row.freshness_sla_minutes === "" ? null : Number(row.freshness_sla_minutes),
-    }),
+      ...(confirmShared ? { confirm_shared: true } : {}),
+    })),
     onSuccess: () => qc.invalidateQueries(),
   });
   return (
     <>
       <PageHead title="Add a table" lead="Adds one table to an ingestion group; the group's next run loads it. For many tables, use Import CSV or Bulk import." />
+      {shared.dialog}
       <Section title="The table">
         <form className="form-grid" onSubmit={(e) => { e.preventDefault(); add.mutate(); }}>
           {FIELDS.map((f) => { const required = f.required && !(row.use_remote_query && JDBC_ONLY.includes(f.key)); return (

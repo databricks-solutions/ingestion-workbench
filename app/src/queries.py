@@ -18,13 +18,18 @@ DEFAULT_PORTS = {"sqlserver": 1433, "oracle": 1521, "postgresql": 5432, "mysql":
 
 # ---- freshness SLA ------------------------------------------------------------------------------
 
+def default_port_sql(alias: str) -> str:
+    """A control row's source type's default port, as ``DEFAULT_PORTS`` lists it (a blank type is SQL Server's)."""
+    whens = " ".join(f"when '{src_type}' then {port}" for src_type, port in DEFAULT_PORTS.items())
+    return f"(case coalesce(nullif(lower(trim({alias}.src_type)), ''), 'sqlserver') {whens} else 0 end)"
+
+
 def database_source_sql(alias: str) -> str:
     """The server, port and credential a control row reads its database through: the key of its
     database's check stamp (the engine's ``state_store.database_source_sql``; a test keeps them equal).
     A blank port reads the source type's default port, as ``DEFAULT_PORTS`` lists it, except on a
     connection-backed row (no host), whose port is the connection's and stays 0."""
-    whens = " ".join(f"when '{src_type}' then {port}" for src_type, port in DEFAULT_PORTS.items())
-    default_port = f"(case coalesce(nullif(lower(trim({alias}.src_type)), ''), 'sqlserver') {whens} else 0 end)"
+    default_port = default_port_sql(alias)
     connection_backed = f"(nullif({alias}.src_host, '') is null and nullif({alias}.src_connection, '') is not null)"
     return (f"lower(coalesce(nullif({alias}.src_host, ''), nullif({alias}.src_connection, ''), '')) || '|' || "
             f"coalesce(nullif({alias}.src_port, 0), "
@@ -2707,6 +2712,144 @@ def clash_jobs_sql() -> str:
             f"group by s.id, s.name order by s.name, s.id limit 20")
 
 
+# The shared-database rule (app/src/shared_databases.py): a database may be in a second live job only when the two jobs
+# write to different catalog.schema targets. The reads below give the rule what it needs without scanning a job's
+# rows unless two jobs really do share a database or a target.
+
+# The live members of live jobs: what "a job's groups" means in the rule (a deleted job's groups read nothing).
+_LIVE_MEMBERS = (f"select m.task_collection, m.schedule_id, s.name from {SCHEMA}.schedule_member m "
+                 f"join {SCHEMA}.schedule s on s.id = m.schedule_id and s.deleted_at is null where m.removed_at is null")
+
+
+def server_key_sql(alias: str) -> str:
+    """shared_databases.server_key in SQL, for a control row read as alias: its server (host:port, or the server the
+    named parameters ep_names and ep_servers give its connection, or connection:<name>) and its database name, as one
+    text. The rule's reads take ep_names and ep_servers (text[], the connections the app can see, lower case, and
+    each one's host:port) as named parameters."""
+    default_port = default_port_sql(alias)
+    return (f"(case when nullif(btrim({alias}.src_host), '') is not null "
+            f"then lower(btrim({alias}.src_host)) || ':' || coalesce(nullif({alias}.src_port, 0), {default_port}) "
+            f"else coalesce((select e.server from unnest(%(ep_names)s::text[], %(ep_servers)s::text[]) as e(name, server) "
+            f"where e.name = lower(btrim({alias}.src_connection))), "
+            f"'connection:' || lower(btrim(coalesce({alias}.src_connection, '')))) end) "
+            f"|| chr(31) || coalesce({alias}.src_database, '')")
+
+
+def live_database_owners_sql() -> str:
+    """The live jobs whose groups read any of the given databases (shared_databases.server_key): one row per database
+    and job, with the database's key, its name as written, and the job's id and name, by job name. What a Create checks
+    before anything is written. Named params: keys (text[]), ep_names and ep_servers (server_key_sql). The names
+    narrow the rows through control_database_idx."""
+    key = server_key_sql("t")
+    return (f"with k as (select unnest(%(keys)s::text[]) as key) "
+            f"select {key} as key, min(t.src_database) as database, l.schedule_id as job_id, min(l.name) as job "
+            f"from {SCHEMA}.control t join ({_LIVE_MEMBERS}) l on l.task_collection = t.task_collection "
+            f"where t.src_database in (select split_part(key, chr(31), -1) from k) and {key} in (select key from k) "
+            f"group by 1, l.schedule_id order by job, job_id, database")
+
+
+def jobs_writing_targets_sql() -> str:
+    """Which of the given targets each given job writes: one row per job and target it writes (lower case
+    catalog.schema). Params: catalogs and schemas (text[], lower case, one entry per target, in the same order), job ids
+    (bigint[]). Each target is looked up through control_sink_client_uq, so a job's other rows are never read."""
+    return (f"select j.id as job_id, x.c || '.' || x.s as target "
+            f"from unnest(%s::text[], %s::text[]) as x(c, s) cross join unnest(%s::bigint[]) as j(id) "
+            f"where exists (select 1 from {SCHEMA}.control c join {SCHEMA}.schedule_member m "
+            f"on m.task_collection = c.task_collection and m.removed_at is null "
+            f"where m.schedule_id = j.id and lower(c.sink_catalog) = x.c and lower(c.sink_schema) = x.s) "
+            f"order by 1, 2")
+
+
+def shared_rule_lock_sql() -> str:
+    """Wait for, and take, the shared-database rule's lock for this transaction: the writes that check the rule
+    (main._refuse_shared_targets) take it before they read, so two writes in two jobs can't each pass the check on what
+    the other has not committed yet. It is held from the check to the commit only."""
+    return "select pg_advisory_xact_lock(hashtextextended('lakefed_ingest.shared_database_rule', 0))"
+
+
+def job_groups_of_sql() -> str:
+    """The live jobs that hold any of the given groups, each with all of its live groups: the job a write's rows
+    belong to, and the groups that make up its tables. Param: groups (text[]). Columns: job_id, task_collection."""
+    return (f"select distinct mine.schedule_id as job_id, every.task_collection "
+            f"from ({_LIVE_MEMBERS}) mine join {SCHEMA}.schedule_member every on every.schedule_id = mine.schedule_id "
+            f"and every.removed_at is null where mine.task_collection = any(%s::text[]) order by 1, 2")
+
+
+def groups_keys_and_targets_sql() -> str:
+    """Every database (shared_databases.server_key) and every target (lower case catalog and schema) the given groups'
+    rows have, once each: what a write that changes all of a job's rows (a settings edit, a Restore, a group added)
+    checks the rule over. Named params: groups (text[]), ep_names and ep_servers. Columns: kind ('database' or
+    'target'), first (the key, or the catalog), second (null, or the schema)."""
+    key = server_key_sql("c")
+    return (f"select distinct 'database' as kind, {key} as first, null::text as second from {SCHEMA}.control c "
+            f"where c.task_collection = any(%(groups)s::text[]) "
+            f"union all select distinct 'target', lower(c.sink_catalog), lower(c.sink_schema) from {SCHEMA}.control c "
+            f"where c.task_collection = any(%(groups)s::text[])")
+
+
+def new_shared_databases_sql() -> str:
+    """The databases among the given keys that a write makes newly shared with another live job: no row of the
+    write's job reads them except the written ones (unless whole, when every key counts as new), and a live job other
+    than the write's reads them through a group that is not the write's. One row per database and other job: the
+    database's name as written, and the job's id and name. Params (named): keys (text[]), groups (the write's job's
+    groups, text[]), ids (the written rows, bigint[]), whole (boolean), jobs (the write's jobs, bigint[]), ep_names
+    and ep_servers (server_key_sql). A key is shared_databases.server_key's."""
+    mine, other = server_key_sql("c"), server_key_sql("o")
+    return (f"with k as (select unnest(%(keys)s::text[]) as key), "
+            f"fresh as (select key from k where %(whole)s or not exists (select 1 from {SCHEMA}.control c "
+            f"where c.task_collection = any(%(groups)s::text[]) "
+            f"and coalesce(c.src_database, '') = split_part(k.key, chr(31), -1) and {mine} = k.key "
+            f"and c.id <> all(%(ids)s::bigint[]))) "
+            f"select min(o.src_database) as database, l.schedule_id as job_id, min(l.name) as job "
+            f"from {SCHEMA}.control o join ({_LIVE_MEMBERS}) l on l.task_collection = o.task_collection "
+            f"where o.src_database in (select split_part(key, chr(31), -1) from fresh) "
+            f"and {other} in (select key from fresh) and o.task_collection <> all(%(groups)s::text[]) "
+            f"and l.schedule_id <> all(%(jobs)s::bigint[]) "
+            f"group by {other}, l.schedule_id order by job, job_id, database")
+
+
+def new_shared_targets_sql() -> str:
+    """The targets among the given ones that a write gives its job newly (no row of the job writes them except the
+    written ones, unless whole) and that a live job other than the write's also writes, through a group that is not the
+    write's. One row per target and other job: the target (lower case catalog.schema), and the job's id and name.
+    Params (named): catalogs and schemas (text[], lower case, one entry per target, in the same order), groups, ids,
+    whole and jobs as new_shared_databases_sql takes them. Each target is looked up through control_sink_client_uq."""
+    return (f"with x as (select * from unnest(%(catalogs)s::text[], %(schemas)s::text[]) as x(c, s)), "
+            f"fresh as (select c, s from x where %(whole)s or not exists (select 1 from {SCHEMA}.control t "
+            f"where lower(t.sink_catalog) = x.c and lower(t.sink_schema) = x.s "
+            f"and t.task_collection = any(%(groups)s::text[]) and t.id <> all(%(ids)s::bigint[]))) "
+            f"select f.c || '.' || f.s as target, l.schedule_id as job_id, min(l.name) as job "
+            f"from fresh f join {SCHEMA}.control o on lower(o.sink_catalog) = f.c and lower(o.sink_schema) = f.s "
+            f"join ({_LIVE_MEMBERS}) l on l.task_collection = o.task_collection "
+            f"where o.task_collection <> all(%(groups)s::text[]) and l.schedule_id <> all(%(jobs)s::bigint[]) "
+            f"group by 1, l.schedule_id order by job, job_id, target")
+
+
+def common_target_sql() -> str:
+    """The first target (lower case catalog.schema) that a live job writes through a group of its own and that the
+    given groups also write, or nothing: a group both hold is one read, not two. Params: the job's id (bigint), groups
+    (text[]), groups again. Reads the job's rows once."""
+    return (f"select j.cat || '.' || j.sch as target from (select distinct lower(c.sink_catalog) as cat, "
+            f"lower(c.sink_schema) as sch from {SCHEMA}.control c join {SCHEMA}.schedule_member m "
+            f"on m.task_collection = c.task_collection and m.removed_at is null where m.schedule_id = %s "
+            f"and c.task_collection <> all(%s::text[])) j "
+            f"where exists (select 1 from {SCHEMA}.control t where lower(t.sink_catalog) = j.cat "
+            f"and lower(t.sink_schema) = j.sch and t.task_collection = any(%s::text[])) order by 1 limit 1")
+
+
+def common_database_sql() -> str:
+    """The first database (its name as written) that a live job reads and that the given groups also read, each
+    through a group of its own, or nothing; a database is shared_databases.server_key's. Named params: job (bigint),
+    groups (text[]), ep_names and ep_servers. Reads the job's rows once, each looked up among the groups' rows of that
+    database (control_collection_database_idx)."""
+    mine, other = server_key_sql("c"), server_key_sql("o")
+    return (f"select o.src_database as database from {SCHEMA}.control o join {SCHEMA}.schedule_member m "
+            f"on m.task_collection = o.task_collection and m.removed_at is null where m.schedule_id = %(job)s "
+            f"and o.task_collection <> all(%(groups)s::text[]) and exists (select 1 from {SCHEMA}.control c "
+            f"where c.task_collection = any(%(groups)s::text[]) "
+            f"and coalesce(c.src_database, '') = coalesce(o.src_database, '') and {mine} = {other}) order by 1 limit 1")
+
+
 def log_change_sql() -> str:
     """Params: changed_by, action, control_id, task_collection, field, old_value, new_value,
     reseed_reason, batch_id."""
@@ -2972,20 +3115,6 @@ def prepare_resume_reads_sql() -> str:
             f"select count(*) as resumed from resumed")
 
 
-def database_owners_sql() -> str:
-    """The first job, by name, whose groups already read one of the given databases (database_key), live or deleted and
-    not yet purged: the database, the job's name and whether it is deleted. What Create refuses by database key alone,
-    before any table is read. Param: database keys (text[])."""
-    key = f"{database_source_sql('t')} || chr(31) || coalesce(t.src_database, '')"
-    return (f"with k as (select unnest(%s::text[]) as key) "
-            f"select min(t.src_database) as database, d.name as job, (d.deleted_at is not null) as deleted "
-            f"from {SCHEMA}.control t join {SCHEMA}.schedule_member m on m.task_collection = t.task_collection "
-            f"join {SCHEMA}.schedule d on d.id = m.schedule_id and (m.removed_at is null or d.deleted_at is not null) "
-            f"and not {PURGED_OPTION.replace('options', 'd.options')} "
-            f"where t.src_database in (select split_part(key, chr(31), -1) from k) and {key} in (select key from k) "
-            f"group by d.id, d.name, d.deleted_at order by d.name, d.id limit 1")
-
-
 def upload_database_sources_sql() -> str:
     """One line per database of an upload (its first, in file order), with its fields: what Create keys each database
     by before anything is written. Param: upload_id."""
@@ -3104,23 +3233,17 @@ def groups_held_elsewhere_sql() -> str:
 
 
 def restore_conflicts_sql() -> str:
-    """What the given groups would share with a live job's groups: a source database (the key split_databases_sql
-    compares) or a target table (compared without case, as Unity Catalog does) that a live job's group also reads or
-    writes. At most 20 rows. Params: groups (list), groups (list). Columns: kind ('database' or 'target'), item,
-    name (of
-    the live job)."""
+    """The target tables (lower case catalog.schema.table, compared without case, as Unity Catalog does) that the given
+    groups write and a live job's other group also writes. Restore refuses these outright; a source database the
+    groups share with a live job is judged by the shared-database rule instead (main._refuse_shared_targets). At most
+    20 rows. Param: groups (list). Columns: item, name (of the live job)."""
     live = (f"join {SCHEMA}.schedule_member om on om.task_collection = o.task_collection and om.removed_at is null "
             f"join {SCHEMA}.schedule s on s.id = om.schedule_id and s.deleted_at is null")
-    database_key = lambda alias: f"{database_source_sql(alias)} || chr(31) || coalesce({alias}.src_database, '')"
-    return (f"select 'database' as kind, c.src_database as item, s.name as name from {SCHEMA}.control c "
-            f"join {SCHEMA}.control o on o.src_database = c.src_database and {database_key('o')} = {database_key('c')} "
-            f"and o.task_collection <> c.task_collection {live} where c.task_collection = any(%s) "
-            f"union "
-            f"select 'target', lower(c.sink_catalog || '.' || c.sink_schema || '.' || c.sink_table), s.name "
+    return (f"select lower(c.sink_catalog || '.' || c.sink_schema || '.' || c.sink_table) as item, min(s.name) as name "
             f"from {SCHEMA}.control c join {SCHEMA}.control o on lower(o.sink_catalog) = lower(c.sink_catalog) "
             f"and lower(o.sink_schema) = lower(c.sink_schema) and lower(o.sink_table) = lower(c.sink_table) "
             f"and o.task_collection <> c.task_collection {live} where c.task_collection = any(%s) "
-            f"order by 1, 2 limit 20")
+            f"group by 1 order by 1 limit 20")
 
 
 def deleted_database_owners_sql() -> str:

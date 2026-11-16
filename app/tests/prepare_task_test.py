@@ -174,8 +174,18 @@ def _client(monkeypatch, source, kind="upload"):
         if sql == q.job_failed_reads_sql():
             rows = failed_rows()
             return [dict(r, total=len(rows)) for r in rows][params[3]:params[3] + params[2]]
-        if sql == q.database_owners_sql():
-            return list(store.owners)
+        if sql == q.deleted_database_owners_sql():
+            return [{"database": o["database"], "job": o["job"], "schedule_id": o.get("job_id", 1)}
+                    for o in store.owners if o["deleted"]][:1]
+        if sql == q.live_database_owners_sql():
+            return [{"key": key, "database": o["database"], "job_id": o.get("job_id", 1), "job": o["job"]}
+                    for o in store.owners if not o["deleted"]
+                    for key in params["keys"] if key.split("\x1f")[-1] == o["database"]]
+        if sql == q.jobs_writing_targets_sql():
+            asked = {f"{c}.{schema}" for c, schema in zip(params[0], params[1])}
+            return [{"job_id": o.get("job_id", 1), "target": target} for o in store.owners if not o["deleted"]
+                    and o.get("job_id", 1) in params[2] for target in o.get("targets", ["main.engagements"])
+                    if target in asked]
         if sql == q.job_selection_sql():
             return [dict(part, id=at) for at, part in enumerate(store.selection.get(params[0], []))]
         if sql == q.job_database_groups_sql():
@@ -373,15 +383,33 @@ def test_the_same_request_id_sent_again_answers_the_job_it_recorded(prepared):
 
 
 def test_create_refuses_by_name_what_it_can_check_before_any_table_is_read(prepared):
-    prepared.store.owners = [{"database": "eng_004", "job": "Sales nightly", "deleted": False}]
-    r = _create(prepared)
-    assert r.status_code == 409 and "eng_004 is in the ingestion job Sales nightly already" in r.text
+    prepared.store.owners = [{"database": "eng_004", "job": "Sales nightly", "job_id": 3, "deleted": False}]
+    r = _create(prepared)       # FAN_IN writes to main.engagements, as Sales nightly does
+    assert r.status_code == 409 and "eng_004 is also in the ingestion job Sales nightly, which writes to " \
+        "main.engagements too" in r.text
+    assert r.json()["detail"]["jobs"] == [{"id": 3, "name": "Sales nightly"}]
     prepared.store.owners = [{"database": "eng_004", "job": "Old job", "deleted": True}]
     assert "deleted ingestion job Old job" in _create(prepared).text
     prepared.store.owners = []
     bad = _create(prepared, settings={**FAN_IN, "sink_table": "{nope}"})
     assert bad.status_code == 422
     assert prepared.store.schedules == [] and prepared.tasks.rows == {}
+
+
+def test_create_asks_to_confirm_a_database_another_job_reads_into_another_schema_then_records_the_job(prepared):
+    prepared.store.owners = [{"database": "eng_004", "job": "Sales nightly", "job_id": 3, "deleted": False,
+                              "targets": ["main.sales"]}]
+    asked = _create(prepared)
+    assert asked.status_code == 409 and asked.json()["detail"]["confirm_shared"] is True
+    assert asked.json()["detail"]["shares"] == [{"database": "eng_004", "job_id": 3, "job": "Sales nightly",
+                                                 "unchecked": False}]
+    assert prepared.store.schedules == [] and prepared.tasks.rows == {}
+    confirmed = prepared.post("/api/ingestion-jobs", json={
+        "name": NAME, "settings": FAN_IN, "dry_run": False, "request_id": "big-1", "confirm_shared": True,
+        "run": {"cadence_minutes": 60, "paused": True},
+        "source": {"upload_id": "u1", "whole_server": True} if prepared.store.kind == "upload"
+        else {"discovery_ids": ["d1"], "whole_server": True}})
+    assert confirmed.status_code == 200 and confirmed.json()["id"] == 7
 
 
 def test_create_refuses_a_job_whose_group_names_another_job_uses(prepared):
