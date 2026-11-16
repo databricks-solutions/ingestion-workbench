@@ -42,7 +42,7 @@ def mixed_targets(rows: Iterable[dict]) -> List[dict]:
     counts: Dict[str, dict] = {}
     for row in rows:
         target = target_of(row)
-        if not target or not row.get("client_id"):
+        if not target or not str(row.get("client_id") or "").strip():
             continue
         found = counts.setdefault(target, {"target": target, "full": 0, "other": 0, "append": False})
         if row.get("load_type") == FULL:

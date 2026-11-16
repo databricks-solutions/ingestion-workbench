@@ -69,6 +69,7 @@ def test_change_tracked_with_cursor_all_full_and_all_change_tracked_targets_are_
 def test_a_dedicated_target_is_no_mix_and_its_row_does_not_count_toward_one():
     assert ml.mixed_targets([shared("full", client=None), shared("ct", client=None)]) == []
     assert ml.mixed_targets([shared("full", client=""), shared("ct", client="b")]) == []
+    assert ml.mixed_targets([shared("full", client="  "), shared("ct", client="b")]) == []
 
 
 def test_a_preview_whose_target_is_not_typed_yet_names_no_target():
@@ -261,7 +262,11 @@ def test_new_ingestion_job_shows_the_previews_warning_and_a_saved_edit_shows_its
     assert "<WriteWarnings warnings={summary?.warnings} />" in new_job
     assert new_job.index("<WriteWarnings warnings={summary?.warnings} />") < new_job.index('<Section title="What it ingests"')
     edit = (FRONTEND / "pages" / "JobEdit.tsx").read_text()
-    assert "<WriteWarnings warnings={save.data?.settings?.warnings} />" in edit
+    assert "<WriteWarnings warnings={settingsWarnings} />" in edit
+
+
+def test_a_job_record_keeps_a_warning_whose_list_is_none():
+    assert preparing.with_warnings({}, [{"kind": "x", "targets": None}])["warnings"] == [{"kind": "x", "targets": []}]
 
 
 def test_the_job_edit_answer_carries_the_warnings_of_the_edit():

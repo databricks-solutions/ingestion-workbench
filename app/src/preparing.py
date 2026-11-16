@@ -293,7 +293,7 @@ def with_warnings(record: dict, warnings: List[dict]) -> dict:
     """The record with the write's warnings (the split-database and mixed-load warnings, as Create answers them when it
     waits for its write), each listing at most LISTED databases or targets: the record is read by every page of jobs,
     and the warning's message counts them all."""
-    return dict(record, warnings=[dict(warning, **{key: list(warning[key])[:LISTED]
+    return dict(record, warnings=[dict(warning, **{key: list(warning[key] or [])[:LISTED]
                                                    for key in ("databases", "targets") if key in warning})
                                   for warning in warnings])
 
