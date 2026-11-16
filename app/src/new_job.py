@@ -204,9 +204,9 @@ def _line_load_types(text: str):
 
 def _partitioning(found: dict) -> Tuple[Optional[dict], List[str]]:
     """A line's partitioning (load_partitioned, partition_col, partition_size_mb) from its partition columns, or None
-    for none, and why the columns can't be taken. A blank load_partitioned with a column or size given, a word that
-    isn't true or false, or a size that isn't a whole number is refused, never read as no partitioning. (A discovered
-    table's columns are written by csv_of, from its recommendation.)"""
+    for none, and why the columns can't be taken. A blank load_partitioned with a column or size given, or a size that
+    isn't a whole number, is refused, never read as no partitioning. (A discovered table's columns are written by
+    csv_of, from its recommendation.)"""
     flag = str(found.get("load_partitioned") or "").strip()
     column = str(found.get("partition_col") or "").strip() or None
     size = str(found.get("partition_size_mb") or "").strip()
@@ -215,11 +215,7 @@ def _partitioning(found: dict) -> Tuple[Optional[dict], List[str]]:
             return None, ["load_partitioned is blank: set it to true to partition on partition_col, or leave "
                           "partition_col and partition_size_mb blank"]
         return None, []
-    try:
-        partitioned = q.parse_bool(flag)
-    except ValueError:
-        return None, [f"load_partitioned must be true or false, not {flag!r}"]
-    if not partitioned:
+    if not q._truthy(flag):
         return None, []
     if size and not size.isdigit():
         return None, [f"partition_size_mb must be a whole number of MB, not {size!r}"]

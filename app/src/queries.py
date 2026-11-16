@@ -1536,9 +1536,9 @@ def control_params(row: dict) -> tuple:
 # tables whose single read outlasts the rest of a run: about 10 GB and up at the rates measured (a few MB/s per read).
 DEFAULT_PARTITION_THRESHOLD_MB = 10240
 DEFAULT_PARTITION_SIZE_MB = 2048
-# A partition size the row check takes: at most 1 TB, well inside the control column's int, so a mistyped size is
-# refused instead of failing the whole write.
-MIN_PARTITION_SIZE_MB, MAX_PARTITION_SIZE_MB = 1, 1048576
+# A partition size the row check takes: at most 10 GB (a larger partition is one long read again), so a mistyped size
+# is refused instead of overflowing the control column's int and failing the whole write.
+MIN_PARTITION_SIZE_MB, MAX_PARTITION_SIZE_MB = 1, 10240
 
 
 def discoveries_sql() -> str:

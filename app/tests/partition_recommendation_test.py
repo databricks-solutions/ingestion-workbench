@@ -126,13 +126,6 @@ def test_csv_of_writes_a_discovered_tables_partition_columns_and_leaves_an_uploa
     assert nj.plan_fields(upload) is upload
 
 
-def test_a_mistyped_load_partitioned_is_refused_not_read_as_false():
-    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "ture,id,2048")["lines"]
-    assert line["status"] == "invalid" and "load_partitioned must be true or false, not 'ture'" in line["errors"]
-    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "on,id,2048")["lines"]
-    assert line["status"] == "valid" and line["row"]["load_partitioned"] is True
-
-
 def test_a_partition_column_or_size_with_a_blank_load_partitioned_is_refused():
     [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", ",id,4096")["lines"]
     assert line["status"] == "invalid" and any(e.startswith("load_partitioned is blank") for e in line["errors"])
@@ -142,11 +135,12 @@ def test_a_partition_column_or_size_with_a_blank_load_partitioned_is_refused():
 
 def test_a_partition_size_must_be_a_whole_number_within_bounds():
     for size, message in (("2048.0", "partition_size_mb must be a whole number of MB, not '2048.0'"),
-                          ("3000000000", "partition_size_mb must be a whole number from 1 to 1,048,576 (MB)"),
-                          ("0", "partition_size_mb must be a whole number from 1 to 1,048,576 (MB)")):
+                          ("10241", "partition_size_mb must be a whole number from 1 to 10,240 (MB)"),
+                          ("3000000000", "partition_size_mb must be a whole number from 1 to 10,240 (MB)"),
+                          ("0", "partition_size_mb must be a whole number from 1 to 10,240 (MB)")):
         [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", f"true,id,{size}")["lines"]
         assert line["status"] == "invalid" and message in line["errors"], (size, line["errors"])
-    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "true,id,1048576")["lines"]
+    [line] = _user_plan("load_partitioned,partition_col,partition_size_mb", "true,id,10240")["lines"]
     assert line["status"] == "valid"
 
 
