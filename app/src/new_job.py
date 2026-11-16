@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import config_import as ci
 import job_settings as js
+import mixed_load
 import placement
 import queries as q
 import table_removal
@@ -356,7 +357,8 @@ def plan_for_job(job_name: str, text: str, load_type: str, job_rows: List[dict],
 def summary(planned: dict) -> dict:
     """What the page shows before Create: tables, databases and groups per server, the invalid lines (a line of the
     file, or a database that could not be read, named with why), and what the file's database lines came to. Lines
-    left out (tables the job removed, not named again) are not written, so they count in left_out alone."""
+    left out (tables the job removed, not named again) are not written, so they count in left_out alone. warnings is
+    what the lines would do to the targets they share (mixed_load.preview_warnings), shown before anything is written."""
     servers: Dict[str, dict] = {}
     written = [line for line in planned["lines"] if line["status"] not in ("in_job", table_removal.LEFT_OUT)]
     for line in written:
@@ -373,6 +375,7 @@ def summary(planned: dict) -> dict:
             "left_out": sum(line["status"] == table_removal.LEFT_OUT for line in planned["lines"]),
             "in_job": sum(line["status"] == "in_job" for line in planned["lines"]), "new_groups": planned.get("new_groups", []),
             "covered": planned.get("covered", 0), "discovered": planned.get("discovered", 0),
+            "warnings": mixed_load.preview_warnings(planned["lines"]),
             "invalid": [{k: line[k] for k in ("line", "table", "errors")} for line in planned["lines"] if line["status"] == "invalid"]
                        + [{"line": u["line"], "table": u["database"], "errors": [u["error"]]} for u in planned.get("unreadable", [])]}
 

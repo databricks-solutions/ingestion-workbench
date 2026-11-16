@@ -2670,6 +2670,34 @@ def mixed_sinks_for_sql() -> str:
             f"where m.dedicated > 0 and m.claims > 1")
 
 
+_LOAD_MIX = (f"select count(*) filter (where r.load_type = 'full') as full_rows, "
+             f"count(*) filter (where r.load_type <> 'full') as other_rows, "
+             f"count(*) filter (where r.load_type = 'full' and r.write_mode = 'append') as append_rows "
+             f"from {SCHEMA}.control r where r.client_id is not null and lower(r.sink_catalog) = s.c "
+             f"and lower(r.sink_schema) = s.sc and lower(r.sink_table) = s.t")
+
+
+def mixed_load_sinks_sql() -> str:
+    """Sinks among the given ones that shared rows (those with a client_id) write with a full reload and with another
+    load type both (main._mixed_load_targets; see mixed_load.py for why that is worth a warning). Looked up as
+    mixed_sinks_for_sql does, by the lower-cased catalog, schema and table that start control_sink_client_uq: one index
+    probe per sink. Enabled and disabled rows count alike, as a disabled row still owns its data. Params: the
+    catalogs, the schemas and the tables (three lists, lower case, one entry per sink, in the same order). Returns the
+    sink as catalog.schema.table, its full reload rows, its other rows and how many full reload rows append."""
+    return (f"select s.c || '.' || s.sc || '.' || s.t as sink, m.full_rows, m.other_rows, m.append_rows "
+            f"from unnest(%s::text[], %s::text[], %s::text[]) as s(c, sc, t) "
+            f"cross join lateral ({_LOAD_MIX}) m where m.full_rows > 0 and m.other_rows > 0 order by 1")
+
+
+def mixed_load_sinks_of_groups_sql() -> str:
+    """mixed_load_sinks_sql for every shared sink the rows of some ingestion groups write (an edit of a whole job's
+    settings, which moves its tables to targets the app has not listed). Param: the groups."""
+    return (f"select s.c || '.' || s.sc || '.' || s.t as sink, m.full_rows, m.other_rows, m.append_rows "
+            f"from (select distinct lower(t.sink_catalog) as c, lower(t.sink_schema) as sc, lower(t.sink_table) as t "
+            f"from {SCHEMA}.control t where t.client_id is not null and t.task_collection = any(%s)) s "
+            f"cross join lateral ({_LOAD_MIX}) m where m.full_rows > 0 and m.other_rows > 0 order by 1")
+
+
 def database_source(row: dict) -> str:
     """``database_source_sql`` of a control-row dict (the engine's ``state_store.database_source``)."""
     host = str(row.get("src_host") or row.get("src_connection") or "").lower()

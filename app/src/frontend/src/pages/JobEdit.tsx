@@ -522,6 +522,7 @@ export default function JobEdit() {
         are {AVAILABLE_WHEN_READY}.</Notice>}
       <ErrorBox error={settings.error || (isUnconfirmed(save.error) ? null : save.error)} />
       <StatusLine line={saveLine} />
+      <WriteWarnings warnings={save.data?.settings?.warnings} />
 
       {schedule && <Section title="Name">
         <div className="form-grid"><label><span>Job name<Required /></span><input value={name} onChange={(e) => setName(e.target.value)} /></label></div>
