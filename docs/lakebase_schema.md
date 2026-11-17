@@ -352,7 +352,9 @@ in the operations app's Bulk import page.
   enabled, and the recommended settings: `select_list` (unsupported column types listed in
   `excluded_columns`), `primary_key`, `load_type` (`ct` if CT and a PK; `cursor` on a rowversion
   column if a PK; else `full`), `cursor_column`, and `partition_candidate`. Partitioning itself is
-  decided at review from a size threshold.
+  decided at review from a size threshold. `can_read` (schema version 19): whether the connection's login could
+  read the table (SELECT on every column of its select list, from SQL Server's `HAS_PERMS_BY_NAME`); the app refuses
+  to add a table with `false` to a job. Null for discoveries made before version 19.
 
 Nothing here is used by ingestion; control rows are created only when a reviewer registers tables.
 

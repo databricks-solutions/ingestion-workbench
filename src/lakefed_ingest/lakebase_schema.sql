@@ -466,6 +466,10 @@ create table if not exists lakefed_ingest.discovered_table (
     discovered_at         timestamptz not null default now(),
     constraint discovered_table_pk primary key (discovery_id, src_database, src_schema, src_table)
 );
+-- Whether the connection's login could read the table when it was discovered (SELECT on every column of its select
+-- list, from HAS_PERMS_BY_NAME). Listing a table needs only metadata rights, so a login may list tables it can't read;
+-- a job made from those fails on every one. NULL: not checked (a discovery made before this column).
+alter table lakefed_ingest.discovered_table add column if not exists can_read boolean;
 
 -- ---------------------------------------------------------------------------------------
 -- Change log for control rows: who changed what, when. Written by the operations app in the same

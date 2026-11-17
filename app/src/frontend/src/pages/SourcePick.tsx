@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api, qs, type Row } from "../api";
-import { Cols, Cut, ErrorBox, Notice, Pager, fmtInt, oneLine, plural, Twisty } from "../components";
+import { Cols, Cut, ErrorBox, Notice, Pager, Tip, fmtInt, oneLine, plural, Twisty } from "../components";
 import { TriBox } from "./Discover";
 import { serverRowPick, underFilter } from "./pickState";
 
@@ -37,7 +37,14 @@ export function pickedText(p: Picked): string {
   return parts.filter(Boolean).join(", ") || "nothing yet";
 }
 
-/** One database's tables in a source, a page at a time, with a search; ticks choose single tables. */
+// Why a table is greyed out: discovery found the connection's login can't read it (discovered_table.can_read false), and
+// a job is refused it (new_job.UNREADABLE_TABLE). Catalog Explorer lists a table you may see but not read in the same
+// way: its name stays, and what you can't do with it is said on the row.
+export const UNREADABLE_TIP = "The connection's login can't read this table (SQL Server gives it no SELECT on it), so a "
+  + "job can't take it. Ask the server's admin to grant the login SELECT on it, then read the database again.";
+
+/** One database's tables in a source, a page at a time, with a search; ticks choose single tables. A table the login
+ *  can't read is greyed out and can't be ticked, and the list says how many there are. */
 export function DatabaseTables({ kind, sourceId, server, database, whole, chosen, onToggle }: { kind: string; sourceId: string;
   server: string; database: string; whole: boolean; chosen: string[]; onToggle: (table: string) => void }) {
   const [search, setSearch] = useState("");
@@ -47,20 +54,30 @@ export function DatabaseTables({ kind, sourceId, server, database, whole, chosen
     queryFn: () => api.get<Row>(`/sources/${kind}/${encodeURIComponent(sourceId)}/tables${qs({ server, database, search, offset, limit: TABLES })}`),
   });
   const rows: Row[] = page.data?.tables ?? [];
+  const unreadable = Number(page.data?.unreadable ?? 0);
   return (
     <>
       <tr className="l3"><td colSpan={3} className="name" style={{ paddingLeft: 62 }}>
         <input className="search" placeholder={`Search ${database}'s tables`} value={search}
           onChange={(e) => { setSearch(e.target.value); setOffset(0); }} /></td></tr>
+      {unreadable > 0 && <tr className="l3"><td colSpan={3} style={{ paddingLeft: 62 }}>
+        {/* A warning that must be read whole, so it wraps rather than being cut to one line. */}
+        <Notice tone="warn">The connection's login can't read {fmtInt(unreadable)} of {fmtInt(page.data?.total ?? 0)}{" "}
+          {plural(Number(page.data?.total ?? 0), "table")} here, so Create refuses {unreadable === 1 ? "it" : "them"}.
+          {whole ? " Tick the tables you want instead of the whole database," : " Leave them unticked,"} or ask the
+          server's admin to grant the login SELECT and read the database again.</Notice></td></tr>}
       {rows.map((t) => {
         const key = `${t.src_schema}.${t.src_table}`;
         const on = whole || chosen.some((c) => c.toLowerCase() === key.toLowerCase());
+        const noRead = t.can_read === false;
         return (
-          <tr key={key} className="l3"><td className="name" style={{ paddingLeft: 62 }}>
-            <span className="cell-line"><TriBox pick={on ? "all" : "none"} label={key} onClick={() => !whole && onToggle(key)} />
+          <tr key={key} className={`l3${noRead && !on ? " closed" : ""}`}><td className="name" style={{ paddingLeft: 62 }}>
+            <span className="cell-line"><TriBox pick={on ? "all" : "none"} label={key}
+              onClick={() => !whole && (!noRead || on) && onToggle(key)} />
             <Cut text={t.notes ? `${key}  ${t.notes}` : key} tipOnlyWhenCut>{key}{t.notes && <span className="sub">{t.notes}</span>}</Cut></span></td>
             <td className="num">{t.row_count != null ? `${fmtInt(t.row_count)} rows` : ""}</td>
-            <td>{t.load_type === "ct" ? "Change tracking" : t.load_type === "cursor" ? <Cut text={`Cursor column ${t.cursor_column ?? ""}`} tipOnlyWhenCut />
+            <td>{noRead ? <Tip text={UNREADABLE_TIP} focusable><span className="tag bad">Can't read</span></Tip>
+              : t.load_type === "ct" ? "Change tracking" : t.load_type === "cursor" ? <Cut text={`Cursor column ${t.cursor_column ?? ""}`} tipOnlyWhenCut />
               : t.load_type === "full" ? "Full reload" : <span className="muted">the job's</span>}</td></tr>
         );
       })}
@@ -147,7 +164,8 @@ export function SourcePick({ kind, sourceId, picked, setPicked }: { kind: "uploa
                 <Twisty open={open === key(d)} onToggle={() => setOpen(open === key(d) ? null : key(d))}><Cut tipOnlyWhenCut
                   text={servers.length > 1 ? `${d.src_database}  ${d.server}` : d.src_database}>{d.src_database}
                   {servers.length > 1 && <span className="sub">{d.server}</span>}</Cut></Twisty></span></td>
-                <td className="num">{fmtInt(d.tables)}{tablesOf(d).length > 0 && <span className="sub">{fmtInt(tablesOf(d).length)} chosen</span>}</td>
+                <td className="num">{fmtInt(d.tables)}{tablesOf(d).length > 0 && <span className="sub">{fmtInt(tablesOf(d).length)} chosen</span>}
+                  {Number(d.unreadable) > 0 && <Tip text={UNREADABLE_TIP} focusable><span className="sub tone-failing">{fmtInt(d.unreadable)} can't be read</span></Tip>}</td>
                 <td className="muted"><Cut text={loadTypes(d)} tipOnlyWhenCut /></td></tr>
               {open === key(d) && <DatabaseTables kind={kind} sourceId={sourceId} server={d.server} database={d.src_database}
                 whole={isWhole(d)} chosen={tablesOf(d)} onToggle={(t) => toggleTable(d, t)} />}

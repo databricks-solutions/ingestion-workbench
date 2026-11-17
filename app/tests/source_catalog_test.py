@@ -46,6 +46,7 @@ def test_the_summary_recommends_what_the_engine_recommends_for_the_same_tables()
     tables, columns, keys = _catalog(SUMMARY_TABLES)
     expected = [dict(row, size_mb=None) for row in discovery.assemble(tables, columns, keys)]
     assert {row["load_type"] for row in expected} == {"ct", "cursor", "full"}
+    assert {row["can_read"] for row in expected} == {True, False}
     # SQL Server gives the rows in no particular order, and assemble_summary sorts them the way assemble does.
     got = catalog.assemble_summary(list(reversed(_summary_rows(tables, columns, keys))))
     assert len(got) == len(expected) == len(SUMMARY_TABLES)
@@ -92,7 +93,7 @@ def test_the_summary_joins_its_lists_with_for_xml_and_reads_only_catalog_views()
 
 def test_the_summary_names_each_output_column():
     aliases = set(re.findall(r"\bAS (\w+)", _literals_blanked(catalog.TABLE_SUMMARY_SQL))) - {"BIGINT", "INT"}
-    assert aliases == {"sch", "tbl", "row_count", "ct_enabled", "select_cols", "excluded_cols", "pk_cols",
+    assert aliases == {"sch", "tbl", "row_count", "ct_enabled", "can_read", "select_cols", "excluded_cols", "pk_cols",
                        "pk_unreadable", "pk_first_type", "rowversion_col", "identity_col", "identity_type"}
 
 
@@ -118,8 +119,9 @@ def _catalog(specs):
     """The engine's three catalog results (tables, columns, key rows) for SUMMARY_TABLES-style specs."""
     tables, columns, keys = [], [], []
     for oid, schema, table, ct_enabled, column_specs, key in specs:
+        # Every third table is one the login can't read, so both copies are seen to keep the answer.
         tables.append({"oid": oid, "sch": schema, "tbl": table, "row_count": oid * 100, "size_mb": float(oid),
-                       "ct_enabled": ct_enabled})
+                       "ct_enabled": ct_enabled, "can_read": int(oid % 3 != 0)})
         for position, spec in enumerate(column_specs, 1):
             base = spec[1]
             columns.append({"oid": oid, "pos": position, "col": spec[0], "base_type": base,
@@ -157,7 +159,7 @@ def _summary_rows(tables, columns, keys):
         identity = next((column for column in readable if column["is_identity"] == 1), None)
         rows.append({
             "sch": table["sch"], "tbl": table["tbl"], "row_count": table["row_count"],
-            "ct_enabled": table["ct_enabled"],
+            "ct_enabled": table["ct_enabled"], "can_read": table["can_read"],
             "select_cols": _joined(column["col"] for column in readable),
             "excluded_cols": _joined(column["col"] for column in table_columns if _unreadable(column)),
             "pk_cols": _joined(column["col"] for column in key_columns),

@@ -148,7 +148,8 @@ def split_sql_statements(ddl: str) -> List[str]:
 #   16 = jdbc_connection (JDBC connections entered by hand in the operations app: a host, port, secret scope and key)
 #   17 = jdbc_login_write (who wrote each JDBC login into the dedicated secret scope, and whether it rotated one)
 #   18 = checkpoint.key_collation (the sink's text keys compare like the source's collation)
-SCHEMA_VERSION = 18
+#   19 = discovered_table.can_read (whether the connection's login could read the table when it was discovered)
+SCHEMA_VERSION = 19
 # Advisory lock that serializes migrations (the setup job and ingestion runs of any collection): two
 # int keys, so it can't collide with a collection's one-key lock whatever the collection is named,
 # and a class of its own (not SOURCE_LOCK_CLASS).

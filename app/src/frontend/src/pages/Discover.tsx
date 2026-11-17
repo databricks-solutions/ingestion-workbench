@@ -358,10 +358,10 @@ function Step2({ connection, discoveryId, checksOn, typedNames, picks, setPicks,
   return (
     <>
       <p className="muted">Tick the whole server, whole databases, or open a database for its tables.
-        {checksOn && <>{" "}<Info>A database the connection's login can't open is greyed out; hover on it for why.</Info></>}</p>
+        {checksOn && <>{" "}<Info>A database the connection's login can't open, or whose tables it can't read, is greyed out; hover on it for why.</Info></>}</p>
       <p className="pick-counts"><b>{countsText(counts, total)}</b>
         {counts.leftOut > 0 && <span className="muted"> · the whole server leaves out {fmtInt(counts.leftOut)} {plural(counts.leftOut, "database")} the
-          login can't open</span>}</p>
+          login can't open or read</span>}</p>
       <div className="toolbar"><input className="search" placeholder="Filter databases, e.g. eng_0" value={filter}
         onChange={(e) => { setFilter(e.target.value); setOffset(0); }} />
         <button className="ghost" onClick={() => setAll(shown.filter((d) => !covered(d) && !closed(d)), "all")}>Select all shown</button></div>
@@ -381,10 +381,10 @@ function Step2({ connection, discoveryId, checksOn, typedNames, picks, setPicks,
               <tr className={`l2${closed(d) ? " closed" : ""}`}><td className="name" style={{ paddingLeft: 30 }}><span className="cell-line">
                 <TriBox pick={pickOf(d)} label={`The whole database ${d}`} onClick={() => !covered(d) && setAll([d], pickOf(d) === "all" ? "none" : "all")} />
                 <Twisty open={open === d} onToggle={() => openDatabase(d)}
-                  closed={closed(d) ? `${d} can't be opened: ${String(seen[d]?.why ?? "the connection's login can't open this database")}` : undefined}><Cut text={d} tipOnlyWhenCut /></Twisty></span></td>
+                  closed={closed(d) ? `${d}: ${String(seen[d]?.why ?? "the connection's login can't open this database")}` : undefined}><Cut text={d} tipOnlyWhenCut /></Twisty></span></td>
                 <td className="num">{reading === d ? "reading…" : ""}</td>
                 <td className="muted">{closed(d) ? <Tip text={String(seen[d]?.why ?? "the connection's login can't open this database")} focusable>
-                  can't open: hover for why</Tip>
+                  no access: hover for why</Tip>
                   : pickOf(d) === "part" ? `${fmtInt((picks[d] as string[]).length)} chosen`
                   : tablesOf(d) != null ? `${fmtInt(tablesOf(d))} ${plural(tablesOf(d), "table")}`
                   : checksOn && accessOf(seen[d]) === "unknown" ? "checking…" : ""}</td></tr>

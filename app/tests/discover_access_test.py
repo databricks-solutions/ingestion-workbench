@@ -12,7 +12,7 @@ def test_the_listed_databases_are_checked_the_page_shown_first():
 
 
 def test_a_database_the_login_cant_open_is_greyed_out_says_why_on_hover_and_is_never_chosen():
-    assert 'closed(d) ? " closed" : ""' in DISCOVER and "can't open: hover for why" in DISCOVER
+    assert 'closed(d) ? " closed" : ""' in DISCOVER and "no access: hover for why" in DISCOVER
     assert "<Tip text={String(seen[d]?.why" in DISCOVER
     assert 'names.filter((d) => pick === "none" || !closed(d))' in DISCOVER
     assert "coveredByServer(wholeServer, d) && !closed(d)" in DISCOVER

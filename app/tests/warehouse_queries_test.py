@@ -82,7 +82,7 @@ def test_a_second_answer_for_a_database_changes_nothing():
     assert "and status = 'running' and coalesce(listing ->> 'statement_id', %s::text) = %s::text " in done
     assert done.endswith("returning src_database")
     assert q.warehouse_check_done_sql().endswith("and status = 'listed'")
-    assert "on conflict (discovery_id, src_database, src_schema, src_table) do nothing" in \
+    assert "on conflict (discovery_id, src_database, src_schema, src_table) do update set " in \
         q.insert_discovered_tables_sql(wr.TABLE_COLUMNS, 1)
 
 

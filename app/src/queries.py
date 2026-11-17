@@ -1075,6 +1075,31 @@ def classify_error(error: Optional[str]) -> Tuple[str, str]:
     return "other", "Other errors"
 
 
+# A Java exception an error names, with the message that follows it ("com.microsoft.sqlserver.jdbc.SQLServerException:
+# The SELECT permission was denied ..."). A stack frame (SQLServerException.makeFromDatabaseError) is not one: a class
+# name must be followed by a colon. A driver's exception is one with SQL in its class name or a jdbc package.
+_JAVA_EXCEPTION = re.compile(r"\b(?:[a-z_$][\w$]*\.)+([A-Z][\w$]*(?:Exception|Error)):[ \t]*")
+# Spark's wrapper around a JVM error raised through Py4J, which says nothing about why.
+_SPARK_WRAPPER = re.compile(r"^(?:[\w.$]+:\s*)?An error occurred while calling [\w.$]+\.?\s*:?\s*")
+_CONNECTION_ID = re.compile(r"\s*ClientConnectionId:\s*[0-9a-fA-F-]+\.?")
+REASON_CHARS = 500
+
+
+def source_reason(error: Optional[str]) -> str:
+    """The source's own reason in an error recorded on a table, for the page to show first. Spark's text starts with
+    its wrapper ("An error occurred while calling o553.sql. : ...") and the engine adds the deepest Java cause after
+    " | caused by " (table_retry.describe), so the reason is the message of the deepest database driver exception the
+    error names (SQL Server's or another JDBC driver's), else of the deepest Java exception, else the error's first
+    line without Spark's wrapper. One line, at most REASON_CHARS characters."""
+    text = str(error or "").strip()
+    named = [m for m in _JAVA_EXCEPTION.finditer(text) if text[m.end():].split("\n", 1)[0].strip()]
+    driver = [m for m in named if "SQL" in m.group(1) or ".jdbc." in m.group(0)]
+    chosen = (driver or named)[-1:] if named else []
+    reason = text[chosen[0].end():] if chosen else _SPARK_WRAPPER.sub("", text)
+    first = reason.strip().split("\n", 1)[0].split(" | caused by ", 1)[0]
+    return _CONNECTION_ID.sub("", first).strip()[:REASON_CHARS]
+
+
 def error_signature(error: Optional[str]) -> str:
     """The error's first line with numbers, quoted names and hex ids blanked, so the same cause on
     different tables groups together."""
@@ -1119,14 +1144,16 @@ order by c.table_last_started_at desc, c.control_id, c.last_at desc"""
 def group_errors(rows: List[dict]) -> List[dict]:
     """Failed tables grouped by cause (class and signature), most tables first: tables (each counted
     once per cause, however often it failed), failures, databases (server and name, with collection),
-    first and last time, and one raw example message. Takes failed_tables_sql's rows (one per table, with its failures and times) or
+    first and last time, one raw example message and the source's reason in it (source_reason). Takes
+    failed_tables_sql's rows (one per table, with its failures and times) or
     plain failed events (one per failure), and counts a table once either way."""
     groups: dict = {}
     for r in rows:
         name, label = classify_error(r.get("error"))
         g = groups.setdefault((name, error_signature(r.get("error"))), {
             "error_class": name, "label": label, "signature": error_signature(r.get("error")),
-            "example": (r.get("error") or "")[:2000], "tables": 0, "failures": 0, "databases": {}, "seen": set(),
+            "example": (r.get("error") or "")[:2000], "reason": source_reason(r.get("error")),
+            "tables": 0, "failures": 0, "databases": {}, "seen": set(),
             "first_at": None, "last_at": None})
         g["failures"] += int(r.get("failures") or 1)
         table = r.get("control_id") or (r.get("task_collection"), r.get("src_database"), r.get("src_schema"),
@@ -1199,7 +1226,8 @@ def failing_table_rows(rows: List[dict]) -> List[dict]:
     """failing_tables_sql's rows, as db.query returns them (timestamps already ISO text), shaped as the job page shows
     them. The class is the engine's error class (a Spark error class, or the exception's type) and the app's word for
     the cause when that is not recorded; the kind is transient, permanent or unknown. The message is the latest
-    failure's, else the checkpoint's note."""
+    failure's, else the checkpoint's note, and reason is the source's own words in it (source_reason), which the page
+    shows first."""
     out = []
     for r in rows:
         message = r.get("error") or r.get("checkpoint_detail") or ""
@@ -1210,6 +1238,7 @@ def failing_table_rows(rows: List[dict]) -> List[dict]:
             "error_class": r.get("error_class") or classify_error(message)[1],
             "error_kind": r.get("error_kind") or None,
             "message": message[:2000],
+            "reason": source_reason(message),
             "failing_since": r.get("failing_since") or None,
             "runs": int(r.get("runs") or 0),
             "failures": int(r.get("failures") or 0),
@@ -1787,11 +1816,18 @@ def warehouse_read_done_sql() -> str:
             f"and (%s::text = 'ok' or not ({DROPPED})) returning src_database")
 
 
+DISCOVERED_TABLE_KEY = ("discovery_id", "src_database", "src_schema", "src_table")
+
+
 def insert_discovered_tables_sql(columns, count: int) -> str:
-    """Insert ``count`` discovered_table rows of the given columns."""
+    """Insert ``count`` discovered_table rows of the given columns. A table already there takes the new answer: a
+    database read again (Read again on a job set aside because its login couldn't read some tables) replaces what the
+    first read found, such as can_read once the login has been granted SELECT. Only the database's own statement
+    writes them (warehouse_read_done_sql), so a second answer to the same read never reaches this."""
     one_row = "(" + ", ".join(["%s"] * len(columns)) + ")"
+    updated = ", ".join(f"{c} = excluded.{c}" for c in columns if c not in DISCOVERED_TABLE_KEY)
     return (f"insert into {SCHEMA}.discovered_table ({', '.join(columns)}) values {', '.join([one_row] * count)} "
-            f"on conflict (discovery_id, src_database, src_schema, src_table) do nothing")
+            f"on conflict ({', '.join(DISCOVERED_TABLE_KEY)}) do update set {updated}, discovered_at = now()")
 
 
 def warehouse_progress_sql(kind: str) -> str:
@@ -1984,8 +2020,8 @@ def recommended_partitioning(size_mb, partition_candidate, threshold_mb: float, 
 
 def review_rows(discovered: List[dict], shared: dict, unity_catalog: bool = False) -> List[dict]:
     """The review grid: one editable row per discovered table, from the recommendations plus the
-    shared fields (sink templates, client_id template, partition threshold). Registered tables and
-    tables with no readable columns start excluded. unity_catalog: the naming rule of the group the rows go
+    shared fields (sink templates, client_id template, partition threshold). Registered tables,
+    tables with no readable columns and tables the connection's login can't read (can_read false) start excluded. unity_catalog: the naming rule of the group the rows go
     into (a job's own rule; see render)."""
     rows = []
     for t in discovered:
@@ -1995,7 +2031,8 @@ def review_rows(discovered: List[dict], shared: dict, unity_catalog: bool = Fals
                                                      shared.get("partition_size_mb", DEFAULT_PARTITION_SIZE_MB))
         registered = t.get("registered_id")
         rows.append({
-            "include": bool(shared.get("include_default", True)) and not registered and bool(t.get("select_list")),
+            "include": (bool(shared.get("include_default", True)) and not registered and bool(t.get("select_list"))
+                        and t.get("can_read") is not False),
             "src_database": db, "src_schema": sch, "src_table": tbl,
             "rows": t.get("row_count"), "size_mb": float(t.get("size_mb") or 0),
             "ct_enabled": bool(t.get("ct_enabled")),
@@ -2942,6 +2979,17 @@ def prepare_read_again_sql() -> str:
             f"and not ({_LEFT_OUT}) and {_named_reads('%s')} returning lower(coalesce(src_connection, src_host)) as server, src_database")
 
 
+def prepare_unreadable_read_sql() -> str:
+    """A job's claimed database whose tables the login couldn't all read (discovered_table.can_read false), found while
+    the job prepares: it is failed with why, so it is set aside as a database that couldn't be read, and Read again
+    reads it again (prepare_read_again_sql) once the login is granted SELECT, and Leave out leaves it out, as for any
+    failed read. Returns it. Params: why, discovery ids (text[]), job id (as text), the server (lower case, without a
+    port), the database (lower case)."""
+    return (f"update {SCHEMA}.discovery set status = 'failed', error = %s, finished_at = now() "
+            f"where {_CLAIMED} and status = 'ok' and not ({DROPPED}) and not ({_LEFT_OUT}) "
+            f"and lower(coalesce(src_connection, src_host)) = %s and lower(src_database) = %s returning src_database")
+
+
 def prepare_leave_out_reads_sql() -> str:
     """Leave out: a job's claimed databases that couldn't be read (all of them, or those named) are marked left out, so
     no list or read takes them again. Returns each one, with why it couldn't be read. Params: as
@@ -3368,23 +3416,25 @@ def upload_head_sql() -> str:
 def source_rows_sql(kind: str) -> str:
     """The tables of an upload (its ok lines; param upload_id) or of discoveries (param: list of discovery ids; a
     table found by more than one, its latest finding), each with its server, database, schema, table, load type, and
-    what the CSV a plan reads takes from it: for an upload its line and fields, for a discovery its settings. The
-    subquery the views and the selection read from."""
+    what the CSV a plan reads takes from it: for an upload its line and fields, for a discovery its settings and
+    whether the login could read the table (can_read, which the plan refuses when false; null for an upload, which
+    is never read). The subquery the views and the selection read from."""
     if kind == "upload":
         return (f"select server, src_database, src_schema, src_table, load_type, null::text as cursor_column, "
-                f"fields->>'primary_key' as primary_key, null::bigint as row_count, null::text as notes, line, fields "
+                f"fields->>'primary_key' as primary_key, null::bigint as row_count, null::text as notes, "
+                f"null::boolean as can_read, line, fields "
                 f"from {SCHEMA}.table_upload_line where upload_id = %s and status = 'ok'")
     return (f"select distinct on (lower(coalesce(d.src_connection, d.src_host)), lower(t.src_database), "
             f"lower(t.src_schema), lower(t.src_table)) "
             f"lower(coalesce(d.src_connection, d.src_host)) as server, t.src_database, t.src_schema, t.src_table, "
-            f"t.load_type, t.cursor_column, t.primary_key, t.row_count, t.notes, 0 as line, "
+            f"t.load_type, t.cursor_column, t.primary_key, t.row_count, t.notes, t.can_read, 0 as line, "
             f"jsonb_build_object('src_connection', d.src_connection, "
             f"'src_host', case when d.src_connection is null then d.src_host end, "
             f"'src_port', case when d.src_connection is null then d.src_port::text end, "
             f"'secret_key', case when d.src_connection is null then d.secret_key end, "
             f"'src_database', t.src_database, 'src_schema', t.src_schema, 'src_table', t.src_table, "
             f"'select_list', t.select_list, 'primary_key', t.primary_key, 'cursor_column', t.cursor_column, "
-            f"'load_type', t.load_type) as fields "
+            f"'load_type', t.load_type, 'can_read', t.can_read) as fields "
             f"from {SCHEMA}.discovered_table t join {SCHEMA}.discovery d "
             f"on d.discovery_id = t.discovery_id and d.src_database = t.src_database "
             f"where t.discovery_id = any(%s) "
@@ -3407,18 +3457,21 @@ def source_servers_sql(kind: str) -> str:
 
 
 def source_databases_sql(kind: str) -> str:
-    """One page of a source's databases matching the filter, by server and name: each one's tables and tables by load
-    type. Params: the source's, filter, limit, offset."""
-    return (f"select r.server, r.src_database, count(*) as tables, {_LOAD_TYPE_COUNTS} "
+    """One page of a source's databases matching the filter, by server and name: each one's tables, tables by load
+    type, and the tables the login can't read. Params: the source's, filter, limit, offset."""
+    return (f"select r.server, r.src_database, count(*) as tables, {_LOAD_TYPE_COUNTS}, "
+            f"count(*) filter (where r.can_read is false) as unreadable "
             f"from ({source_rows_sql(kind)}) r where {_MATCHES} group by r.server, r.src_database "
             f"order by r.server, lower(r.src_database) limit %s offset %s")
 
 
 def source_tables_sql(kind: str) -> str:
     """One page of a database's tables in a source, by schema and name, those matching the search (in schema.table).
-    Params: the source's, server, database, search, limit, offset. Each row carries the page's total as total."""
+    Params: the source's, server, database, search, limit, offset. Each row carries the page's total as total, and
+    how many of the database's tables matching the search the login can't read as unreadable."""
     return (f"select r.src_schema, r.src_table, r.load_type, r.cursor_column, r.primary_key, r.row_count, r.notes, "
-            f"count(*) over () as total from ({source_rows_sql(kind)}) r "
+            f"r.can_read, count(*) over () as total, count(*) filter (where r.can_read is false) over () as unreadable "
+            f"from ({source_rows_sql(kind)}) r "
             f"where lower(r.server) = lower(%s) and r.src_database = %s "
             f"and position(lower(%s) in lower(r.src_schema || '.' || r.src_table)) > 0 "
             f"order by lower(r.src_schema), lower(r.src_table) limit %s offset %s")

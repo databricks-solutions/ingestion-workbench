@@ -277,7 +277,8 @@ def test_one_jobs_export_reads_back_as_the_same_tables_through_create_from_one_c
              u["fields"]["attr:region"], u["fields"]["attr:tier"]) for u in upload["lines"]] == [
         ("Sales", "Orders", "ct", "id, amount", "s1", "North", "2"), ("Sales", "Lines", "full", "", "", "", "")]
 
-    plain, load_types = nj._line_load_types(text)
+    plain, values = nj._line_columns(text, ("load_type",))
+    load_types = values["load_type"]
     read = ci.plan_import(plain, "_new", dict(src_type="sqlserver", use_remote_query=True, load_type="ct",
                                               write_mode="merge", fan_in=True, sink_catalog="c", sink_schema="s",
                                               sink_table="{table}", freshness_sla_minutes=None), [], check_rows=False)
