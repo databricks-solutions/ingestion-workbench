@@ -43,6 +43,8 @@ export function WritesFields({ w, setW, stored, modeNote, targetsNote, reseed }:
         <label><span>Target table<Required /><Info label="About target names">{TAGS_HELP}</Info></span><input value={w.sink_table ?? ""} onChange={(e) => setW({ ...w, sink_table: e.target.value })} /><Mixed s={stored?.sink_table} /></label>
         {reseed}
       </div>
+      {w.write_mode_full === "append" && <p className="impact">Full-reload tables in append mode add a whole copy of each
+        table every run, so their target tables grow by the tables' size each run. Merge replaces the rows instead.</p>}
       {modeNote}
       {targetsNote}
     </>

@@ -31,7 +31,7 @@ const FIELDS: Field[] = [
   { key: "sink_table", label: "Target table", required: true },
   { key: "client_id", label: "Client ID", help: "set to share one sink across databases" },
   { key: "write_mode", label: "Write mode", options: ["merge", "append"], initial: "merge",
-    help: "append: the sink is a change log (ct and full)" },
+    help: "merge: the current rows (a full load replaces them); append: a change log (a full load adds a whole copy every run)" },
   { key: "client_attrs", label: "Identity columns", help: 'JSON object, e.g. {"tenant_name": "Acme"}' },
   { key: "cursor_column", label: "Cursor column", help: "cursor only (rowversion recommended)" },
   { key: "load_partitioned", label: "Partitioned first load", type: "checkbox", initial: false },

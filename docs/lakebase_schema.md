@@ -139,7 +139,7 @@ for the run's `task_collection`). See [Control rows](how-it-works.md#control-row
 | `sink_catalog`, `sink_schema`, `sink_table` | Target Delta table |
 | `client_id` | Optional. Set it to share one sink across many source databases; written to the sink column `__client_id__` |
 | `client_attrs` | Optional JSON object `{column: value}`: identity columns written (as STRING) on every row, e.g. the tenant name or source server |
-| `write_mode` | `merge` (default): the sink mirrors the source table. `append` (`ct` and `full`): the sink is a change log (see [Append sinks](how-it-works.md#append-sinks-optional)) |
+| `write_mode` | `merge` (default): the sink mirrors the source table; for `full`, each run replaces its rows (no MERGE runs). `append` (`ct` and `full`): the sink is a change log (see [Append sinks](how-it-works.md#append-sinks-optional)); for `full`, each run adds a whole copy of the table, so the sink grows by the table's size each run |
 | `load_type` | Load strategy: `ct` \| `cursor` \| `full` (`cdc` is a placeholder) |
 | `cursor_column` | `cursor` only: the high-watermark column (rowversion recommended) |
 | `load_partitioned`, `partition_col`, `partition_size_mb` | Optional partitioned seed / full load for large tables |

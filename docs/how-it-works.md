@@ -285,7 +285,9 @@ with four extra columns:
   at one version. A reseed follows lapsed retention, CT turned off and on, or a version reset
   (changes that couldn't be read), so downstream, a key missing from a later snapshot was deleted.
   A `full` load appends a snapshot every run, so the sink grows by the table's size each run (fine
-  for small tables and views; use merge mode for large ones). Treat each (`__client_id__`,
+  for small tables and views; use merge mode for large ones, which for `full` replaces the rows each run).
+  The pair is easy to set by mistake, so each run's output warns about its `full` tables in append mode
+  (`planner.full_append_warning`), and the app says so where the mode is chosen. Treat each (`__client_id__`,
   `__run_id`) set of `S` rows as one snapshot.
 - With `client_id`, many source databases append to one sink, created with liquid clustering on
   `__client_id__`. `client_attrs` adds identity columns: a JSON object such as

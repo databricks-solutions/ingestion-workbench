@@ -700,3 +700,15 @@ def test_a_failure_message_cuts_a_long_error_and_says_where_to_look_without_a_li
     message = planner.failure_message(7, "cohort", [_failed_row("db", "orders", "x" * 900)])
     assert message.splitlines()[1] == "db.dbo.orders: " + "x" * 200
     assert message.splitlines()[-1] == "See the run in the operations app or lakefed_ingest.ingest_event."
+
+
+def test_a_run_warns_about_its_full_reload_tables_in_append_mode():
+    def cfg(table, load_type="full", write_mode="append"):
+        return {"src_database": "d", "src_schema": "dbo", "src_table": table, "load_type": load_type,
+                "write_mode": write_mode}
+    assert planner.full_append_warning([cfg("a", write_mode="merge"), cfg("b", load_type="ct")]) is None
+    assert planner.full_append_warning([]) is None
+    one = planner.full_append_warning([cfg("a"), cfg("b", write_mode="merge")])
+    assert one.startswith("[warn] 1 full-reload table(s) in append mode") and "d.dbo.a." in one and "d.dbo.b" not in one
+    many = planner.full_append_warning([cfg(t) for t in "abcde"])
+    assert "d.dbo.a, d.dbo.b, d.dbo.c and 2 more." in many and "set write_mode to merge" in many.lower()

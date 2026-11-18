@@ -2321,10 +2321,19 @@ def plan_edit(rows: List[dict], changes: dict, bulk: bool) -> List[dict]:
             p["notes"].append("rows already written keep their client_attrs values; columns added now are NULL on them")
         if "task_collection" in p["changes"]:
             p["notes"].append(f"moves to ingestion group {merged['task_collection']}: that group's runs and schedule apply")
+        if ({"load_type", "write_mode"} & set(p["changes"]) and merged.get("load_type") == "full"
+                and merged.get("write_mode") == "append"):
+            p["notes"].append(FULL_APPEND_NOTE)
         if p["reseed"]:
             p["notes"].insert(0, f"reseed required ({p['reseed']}): the table is copied again on its next run")
         plans.append(p)
     return plans
+
+
+# A full reload in append mode adds a whole copy of the table every run (a snapshot, by design); merge replaces the
+# rows. The pair is easy to set by mistake, so an edit that makes it says so (the engine warns each run too).
+FULL_APPEND_NOTE = ("a full reload in append mode adds a whole copy of the table every run, so its target grows by "
+                    "the table's size each run; merge replaces the rows instead")
 
 
 def control_rows_for_update_sql() -> str:
