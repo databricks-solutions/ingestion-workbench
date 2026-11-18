@@ -472,7 +472,7 @@ def test_a_selection_is_read_in_key_order_pages_and_refused_past_the_cap(monkeyp
 
     def query(sql, params=()):
         assert sql == q.selected_rows_page_sql("upload")
-        after, limit = tuple(params[5:10]), params[10]
+        after, limit = tuple(params[6:11]), params[11]
         page = [dict(r, k_database=r["src_database"].lower(), k_schema=r["src_schema"].lower(),
                      k_table=r["src_table"].lower())
                 for r in sorted(rows, key=key) if key(r) > after][:limit]
@@ -536,7 +536,7 @@ def test_create_by_reference_plans_the_lines_read_back_from_lakebase(client, mon
     r = client.post("/api/ingestion-jobs", json={"name": "Ref", "settings": FAN_IN, "source": source})
     assert r.status_code == 200 and r.json()["summary"]["tables"] == 3 and client.db.statements == []
     assert r.json()["summary"]["invalid"] == []
-    assert asked[0][:5] == ("u1", False, "", ["sql_a\x1feng_001"], ["sql_a\x1feng_002\x1fgen.t9"])
+    assert asked[0][:6] == ("u1", False, "", [], ["sql_a\x1feng_001"], ["sql_a\x1feng_002\x1fgen.t9"])
     r = client.post("/api/ingestion-jobs", json={"name": "Ref", "settings": FAN_IN, "source": source, "dry_run": False})
     assert r.json()["created"] is True
     kept = client.db.of("insert into lakefed_ingest.job_selection")

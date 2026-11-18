@@ -2,6 +2,7 @@ import { Fragment, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { api, qs, type Row } from "../api";
 import { Cut, ErrorBox, Pager, Twisty, fmtInt } from "../components";
+import { coveredByServer, excludedFrom, type WholeServer } from "./pickState";
 
 // New job's What it ingests, below a server row: the databases chosen on it, a page at a time, and a database's tables
 // read only once it is opened. It uses the reads the app has already (GET /api/sources/{kind}/{id} for the databases of
@@ -73,12 +74,21 @@ export function ChosenDatabases({ source, server }: { source: Row; server: strin
     queryFn: () => api.get<Row>(`/sources/${kind}/${encodeURIComponent(id)}${qs({ filter: source.filter ?? "", offset, limit: PAGE })}`),
   });
   const wholeRows = (whole.data?.databases ?? []).filter((d: Row) => String(d.server).toLowerCase() === server.toLowerCase());
-  const covered = (database: string) => !!source.whole_server && database.toLowerCase().includes(String(source.filter ?? "").toLowerCase());
+  // The whole server as Discover chose it on this server, with the rule Discover ticks by, so the two never disagree.
+  const wholeServer: WholeServer = { on: !!source.whole_server, filter: String(source.filter ?? ""),
+    excluded: (source.excluded_databases ?? []).filter((d: Row) => String(d.server).toLowerCase() === server.toLowerCase())
+      .map((d: Row) => String(d.database)) };
+  const covered = (database: string) => coveredByServer(wholeServer, database);
   const named = namedDatabases(source, server).filter((d) => !covered(d.database));
   return (
     <>
-      {wholeRows.map((d: Row) => <DatabaseRow key={`w-${d.src_database}`} source={source} server={server} database={d.src_database}
-        tables={d.tables} picked={null} />)}
+      {wholeRows.map((d: Row) => excludedFrom(wholeServer, String(d.src_database))
+        // Unticked under the whole server: listed where the source lists it, so the pages and their count stay the
+        // source's, and said to be left out, as Discover's row shows it unticked.
+        ? <tr key={`w-${d.src_database}`} className="l2"><td className="name"><Cut text={d.src_database} tipOnlyWhenCut /></td>
+            <td></td><td className="num muted">left out</td></tr>
+        : <DatabaseRow key={`w-${d.src_database}`} source={source} server={server} database={d.src_database}
+            tables={d.tables} picked={null} />)}
       {(whole.data?.matched?.databases ?? 0) > PAGE && <tr className="l2"><td colSpan={3}>
         <Pager offset={offset} limit={PAGE} total={whole.data!.matched.databases} noun="database" onPage={setOffset} /></td></tr>}
       {named.slice(namedOffset, namedOffset + PAGE).map((d) => (

@@ -417,10 +417,11 @@ Uploads are kept: the app has no DELETE privilege. Prune old ones by `uploaded_a
 
 Written by the operations app (schema version 9), in the transaction that writes the job's tables, when they were
 chosen from an upload or a discovery. One row per part: `job_id`, `scope` (`server`: every database of the server
-matching `filter`; `database`: a whole database; `tables`: the `tables` named, as schema.table), `server`,
-`src_database`, `source_kind` (`discovery` or `upload`) and `source_id`, `created_by`, `created_at`. A later
-re-discovery reads it: a whole server takes its new databases, a whole database its new tables, chosen tables
-nothing more (see Re-discovery in [app/README.md](../app/README.md)). Tables given as CSV lines in the request body
+matching `filter`; `excluded_database`: a database in `src_database` unticked under that whole server, which it doesn't
+take; `database`: a whole database; `tables`: the `tables` named, as schema.table), `server`, `src_database`,
+`source_kind` (`discovery` or `upload`) and `source_id`, `created_by`, `created_at`. A selection kept before
+`excluded_database` has no such rows and reads as before. A later re-discovery reads it: a whole server takes its new
+databases (never one unticked under it), a whole database its new tables, chosen tables nothing more (see Re-discovery in [app/README.md](../app/README.md)). Tables given as CSV lines in the request body
 record nothing here. A job's purge removes its rows:
 the delete job (`lakefed_ingest_delete_job`) deletes them in the transaction that deletes the job's groups, once the
 job's retention has run out or at Delete now. A Remove of one table of a live job does the same for that table alone

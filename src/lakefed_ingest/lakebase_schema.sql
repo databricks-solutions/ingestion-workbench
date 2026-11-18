@@ -598,7 +598,7 @@ create index if not exists table_upload_line_database_idx
 create table if not exists lakefed_ingest.job_selection (
     id            bigserial   primary key,
     job_id        bigint      not null,                    -- schedule.id
-    scope         text        not null,                    -- server, database or tables
+    scope         text        not null,                    -- server, excluded_database, database or tables
     server        text        not null,
     src_database  text,                                    -- null for a whole server
     tables        text[],                                  -- schema.table, for scope tables

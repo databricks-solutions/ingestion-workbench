@@ -250,12 +250,12 @@ comment on column lakefed_ingest.table_upload_line.fields is 'JSON of the line a
 comment on column lakefed_ingest.table_upload_line.status is 'ok, database (a whole database, found by name when the job is created) or invalid.';
 comment on column lakefed_ingest.table_upload_line.errors is 'Why an invalid line cannot be taken.';
 
-comment on table lakefed_ingest.job_selection is 'What an ingestion job was made from: one row per part of the selection (a whole server, a whole database, or named tables), read by re-discovery to know what to add later.';
+comment on table lakefed_ingest.job_selection is 'What an ingestion job was made from: one row per part of the selection (a whole server, a database unticked under it, a whole database, or named tables), read by re-discovery to know what to add later.';
 comment on column lakefed_ingest.job_selection.id is 'Primary key.';
 comment on column lakefed_ingest.job_selection.job_id is 'The ingestion job (schedule.id).';
-comment on column lakefed_ingest.job_selection.scope is 'server (every database of the server matching filter), database (a whole database) or tables (the tables named).';
+comment on column lakefed_ingest.job_selection.scope is 'server (every database of the server matching filter), excluded_database (a database unticked under that whole server, which it does not take), database (a whole database) or tables (the tables named).';
 comment on column lakefed_ingest.job_selection.server is 'The server: its Unity Catalog connection, or host and port.';
-comment on column lakefed_ingest.job_selection.src_database is 'The database, null for a whole server.';
+comment on column lakefed_ingest.job_selection.src_database is 'The database (for excluded_database, the one left out), null for a whole server.';
 comment on column lakefed_ingest.job_selection.tables is 'The tables named, as schema.table, for scope tables.';
 comment on column lakefed_ingest.job_selection.filter is 'The database name filter a whole server was chosen with.';
 comment on column lakefed_ingest.job_selection.source_kind is 'Where the selection came from: discovery or upload.';

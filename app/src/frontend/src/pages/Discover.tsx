@@ -6,7 +6,8 @@ import { useSettings } from "../App";
 import { DatabaseTables } from "./SourcePick";
 import { ConnectionTable } from "./ConnectionTable";
 import { CreateConnectionChoices } from "./CreateConnectionChoices";
-import { accessOf, countsText, likeContaining, readable, selectionCounts, serverRowPick, underFilter, type Pick, type ServerCount } from "./pickState";
+import { accessOf, countsText, coveredByServer, databaseTickUnderServer, excludedFrom, likeContaining, noWholeServer, readable,
+  selectionCounts, serverRowPick, serverTick, takeBack, type Pick, type ServerCount, type WholeServer } from "./pickState";
 import { connectionFailure, connectionNextBlock, connectionNextLabel, MASTER_ACCESS, readsDone, waitLine, type ErrorCodes } from "../pending";
 
 /** The discover tree's columns as Catalog Explorer's tables list keeps them: the name takes the spare width. */
@@ -220,11 +221,13 @@ function Step1({ chosen, setChosen, tested, setTested, testing, error, setError 
 }
 
 type Picks = Record<string, Pick | string[]>;
-/** The whole server, as a flag: on, and the filter it was ticked under (it covers the databases whose names contain it). */
-type WholeServer = { on: boolean; filter: string };
 const DATABASES_PER_PAGE = 100;
-/** Whether a whole-server tick covers a database: the same rule as SourcePick's, so the two pages never disagree. */
-const coveredByServer = (server: WholeServer, database: string) => server.on && underFilter(database, server.filter);
+
+/** The whole server chosen, in words: "the whole server", or "every database matching "eng"", and how many databases
+ *  were unticked under it ("the whole server except 2 databases"). */
+const wholeServerWords = (whole: WholeServer) =>
+  (whole.filter ? `every database matching "${whole.filter}"` : "the whole server")
+  + (whole.excluded.length ? ` except ${fmtInt(whole.excluded.length)} ${plural(whole.excluded.length, "database")}` : "");
 
 /** What a choice takes, as Step 2 counts it: shown at its top, in its last line and in the job's Chosen summary. */
 type Counts = ReturnType<typeof selectionCounts> & { listed: number };
@@ -261,6 +264,21 @@ function Step2({ connection, discoveryId, checksOn, typedNames, picks, setPicks,
     }
   }, [listing.data]);
   const closed = (d: string) => accessOf(seen[d]) === "closed";
+  // Each database unticked under the whole server is asked for by name, whichever page is shown, so its check's latest
+  // answer (open, and its tables) is the one the counts leave out. The access check's refresh asks again.
+  const unticked = useQuery({
+    queryKey: ["discovery-listing", discoveryId, "unticked", wholeServer.excluded.join("\n")], placeholderData: keepPreviousData,
+    enabled: discoveryId != null && wholeServer.on && wholeServer.excluded.length > 0,
+    queryFn: async () => {
+      const pages = await Promise.all(wholeServer.excluded.map((d) => api.get<Row>(
+        `/discoveries/${encodeURIComponent(String(discoveryId))}/listing${qs({ filter: d, offset: 0, limit: 500 })}`)));
+      return pages.flatMap((page) => (page.databases ?? []) as Row[]).filter((r) => excludedFrom(wholeServer, String(r.src_database)));
+    },
+  });
+  useEffect(() => {
+    const rows = unticked.data ?? [];
+    if (rows.length) setSeen((now) => ({ ...now, ...Object.fromEntries(rows.map((r) => [r.src_database, r])) }));
+  }, [unticked.data]);
   // Through the SQL warehouse, the databases the page shows are checked, and only those: another page or filter checks
   // its own. The answers stay on the listing in Lakebase, so a database is checked once. The check runs out of sight:
   // nothing on the page spins for it while the user chooses.
@@ -302,17 +320,19 @@ function Step2({ connection, discoveryId, checksOn, typedNames, picks, setPicks,
     : typedNames.some((d) => pickOf(d) !== "none") ? "part" : "none";
   const anyChosen = Object.values(picks).some((p) => (Array.isArray(p) ? p.length > 0 : p === "all" || p === "part"));
   const server: Pick = discoveryId == null ? typedServer : serverRowPick(wholeServer, filter, anyChosen);
+  const serverWords = discoveryId != null && wholeServer.on ? wholeServerWords(wholeServer) : "the whole server";
   // Each change starts from the choices as they are then, so quick clicks never undo each other. A database the login
   // can't open is never chosen.
   const setAll = (names: string[], pick: Pick) => setPicks((now) => ({
     ...now, ...Object.fromEntries(names.filter((d) => pick === "none" || !closed(d)).map((d) => [d, pick])) }));
   const access = serverTotals.data?.access;
+  const tablesOf = (d: string): number | null => (accessOf(seen[d]) === "open" && seen[d]?.tables != null ? Number(seen[d].tables) : null);
   const serverCount: ServerCount | null = discoveryId != null && wholeServer.on
     ? { matched: Number(serverTotals.data?.matched ?? total), closed: Number(access?.matched_closed ?? 0),
-        unknown: checksOn ? Number(access?.matched_unknown ?? 0) : 1, tables: Number(access?.matched_tables ?? 0) }
+        unknown: checksOn ? Number(access?.matched_unknown ?? 0) : 1, tables: Number(access?.matched_tables ?? 0),
+        excluded: wholeServer.excluded.filter((d) => !closed(d)).map(tablesOf) }
     : null;
   const wholeNames = Object.keys(picks).filter((d) => picks[d] === "all" && !covered(d));
-  const tablesOf = (d: string): number | null => (accessOf(seen[d]) === "open" && seen[d]?.tables != null ? Number(seen[d].tables) : null);
   const counts: Counts = {
     ...selectionCounts(serverCount, wholeNames.map(tablesOf),
                        Object.entries(picks).filter(([d, p]) => Array.isArray(p) && p.length > 0 && !covered(d)).map(([, p]) => (p as string[]).length)),
@@ -320,12 +340,32 @@ function Step2({ connection, discoveryId, checksOn, typedNames, picks, setPicks,
   const countsKey = JSON.stringify(counts);
   useEffect(() => { onCounts(JSON.parse(countsKey)); }, [countsKey]);
   // A whole-server tick takes over what it covers: the picks of the databases matching its filter go. A discovery keeps
-  // just the flag; typed names are each ticked, as before.
+  // just the flag and the databases unticked under it; typed names are each ticked, as before.
   const tickServer = () => {
     if (discoveryId == null) return setAll(typedNames, server === "all" ? "none" : "all");
-    const turningOff = server === "all";
-    setWholeServer({ on: !turningOff, filter });
-    if (!turningOff) setPicks((now) => Object.fromEntries(Object.entries(now).filter(([d]) => !underFilter(d, filter))));
+    const next = serverTick(wholeServer, filter, server);
+    setWholeServer(next);
+    if (next.on) setPicks((now) => Object.fromEntries(Object.entries(now).filter(([d]) => !coveredByServer(next, d))));
+  };
+  // Under a ticked server a database's tick leaves it out of the server or takes it back (any tables picked in it go,
+  // as the server takes it whole again), as a row of the Jobs list's selection unticks under its select-all box.
+  // Anywhere else it chooses the database whole.
+  const tickDatabase = (d: string) => {
+    if (closed(d)) return;
+    const underServer = discoveryId != null ? databaseTickUnderServer(wholeServer, d) : null;
+    if (!underServer) return setAll([d], pickOf(d) === "all" ? "none" : "all");
+    setWholeServer(underServer);
+    setPicks((now) => Object.fromEntries(Object.entries(now).filter(([name]) => name !== d)));
+  };
+  // Select all shown: the databases unticked under the whole server come back to it (their table picks go); the others
+  // shown are chosen whole.
+  const selectAllShown = () => {
+    const back = discoveryId != null ? shown.filter((d) => excludedFrom(wholeServer, d) && !closed(d)) : [];
+    if (back.length) {
+      setWholeServer(takeBack(wholeServer, back));
+      setPicks((now) => Object.fromEntries(Object.entries(now).filter(([d]) => !back.includes(d))));
+    }
+    setAll(shown.filter((d) => !covered(d) && !closed(d) && !back.includes(d)), "all");
   };
   const openDatabase = async (d: string) => {
     if (open === d) return setOpen(null);
@@ -364,22 +404,19 @@ function Step2({ connection, discoveryId, checksOn, typedNames, picks, setPicks,
           login can't open</span>}</p>
       <div className="toolbar"><input className="search" placeholder="Filter databases, e.g. eng_0" value={filter}
         onChange={(e) => { setFilter(e.target.value); setOffset(0); }} />
-        <button className="ghost" onClick={() => setAll(shown.filter((d) => !covered(d) && !closed(d)), "all")}>Select all shown</button></div>
+        <button className="ghost" onClick={selectAllShown}>Select all shown</button></div>
       <div className="table-wrap tree-pick"><table {...oneLine(DISCOVER_WIDTHS, "tree")}>
         <Cols widths={DISCOVER_WIDTHS} />
         <thead><tr><th>Server › database › schema.table</th><th className="num">Tables</th><th>Load type</th></tr></thead>
         <tbody>
           <tr><td className="name"><span className="cell-line"><TriBox pick={server} label={`The whole server ${connection}`} onClick={tickServer} />
-            <Cut tipOnlyWhenCut text={`${connection}, ${discoveryId != null && wholeServer.on && wholeServer.filter
-              ? `every database matching "${wholeServer.filter}"` : "the whole server"}`}>
-            <b>{connection}</b>, {discoveryId != null && wholeServer.on && wholeServer.filter
-              ? <>every database matching "{wholeServer.filter}"</> : "the whole server"}</Cut></span></td>
+            <Cut tipOnlyWhenCut text={`${connection}, ${serverWords}`}><b>{connection}</b>, {serverWords}</Cut></span></td>
             <td className="num">{fmtInt(total)} {plural(total, "database")}</td>
             <td className="muted">{server === "part" ? "chosen in part" : ""}</td></tr>
           {shown.slice(0, 500).map((d) => (
             <Fragment key={d}>
               <tr className={`l2${closed(d) ? " closed" : ""}`}><td className="name" style={{ paddingLeft: 30 }}><span className="cell-line">
-                <TriBox pick={pickOf(d)} label={`The whole database ${d}`} onClick={() => !covered(d) && setAll([d], pickOf(d) === "all" ? "none" : "all")} />
+                <TriBox pick={pickOf(d)} label={`The whole database ${d}`} onClick={() => tickDatabase(d)} />
                 <Twisty open={open === d} onToggle={() => openDatabase(d)}
                   closed={closed(d) ? `${d} can't be opened: ${String(seen[d]?.why ?? "the connection's login can't open this database")}` : undefined}><Cut text={d} tipOnlyWhenCut /></Twisty></span></td>
                 <td className="num">{reading === d ? "reading…" : ""}</td>
@@ -426,7 +463,7 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<unknown>(null);
   const [picks, setPicks] = useState<Picks>({});
-  const [wholeServer, setWholeServer] = useState<WholeServer>({ on: false, filter: "" });
+  const [wholeServer, setWholeServer] = useState<WholeServer>(noWholeServer);
   // The whole server's discovery, read once (under its filter); its databases aren't listed here.
   const [serverRead, setServerRead] = useState<string | null>(null);
   const [read, setRead] = useState<Record<string, string>>({});
@@ -460,7 +497,7 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
   const whole = Object.keys(picks).filter((d) => picks[d] === "all" && !coveredByServer(wholeServer, d));
   const handPicked = Object.entries(picks).filter(([d, p]) => Array.isArray(p) && p.length > 0 && !coveredByServer(wholeServer, d)) as [string, string[]][];
   const chosen = (wholeServer.on ? 1 : 0) + whole.length + handPicked.length;
-  const chosenWords = [wholeServer.on ? (wholeServer.filter ? `every database matching "${wholeServer.filter}"` : "the whole server") : "",
+  const chosenWords = [wholeServer.on ? wholeServerWords(wholeServer) : "",
     whole.length ? `${fmtInt(whole.length)} whole ${plural(whole.length, "database")}` : "",
     handPicked.length ? `tables from ${fmtInt(handPicked.length)} more` : ""].filter(Boolean).join(", ");
   // Databases chosen whole whose tables aren't read yet are discovered on Add. The whole server is read once, only the
@@ -472,7 +509,8 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
   const drafting = drafts && throughWarehouse && discoveryId != null;
   const latest = useRef({ whole, read, wholeServer });
   latest.current = { whole, read, wholeServer };
-  const draftState = useRef<{ named: string | null; names: Set<string>; server: { id: string; filter: string } | null }>(
+  const draftState = useRef<{ named: string | null; names: Set<string>;
+                              server: { id: string; filter: string; excluded: Set<string> } | null }>(
     { named: null, names: new Set(), server: null });
   const syncing = useRef<Promise<void>>(Promise.resolve());
   const handed = useRef(false);
@@ -501,7 +539,21 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
       if (want !== null && !d.server) {
         const got = await api.post<Row>("/discoveries/source", { src_connection: connection, kind: "tables", whole_server: true,
                                                                   listing_id: discoveryId, filter: want, draft: true });
-        d.server = { id: String(got.discovery_id), filter: want };
+        d.server = { id: String(got.discovery_id), filter: want, excluded: new Set() };
+      }
+      // A database unticked under the whole server leaves its read the same way, and ticked again comes back.
+      if (d.server) {
+        const server = d.server;
+        const leaving = serverNow.excluded.filter((name) => !server.excluded.has(name));
+        const back = [...server.excluded].filter((name) => !excludedFrom(serverNow, name));
+        if (leaving.length) {
+          await api.post(`/discoveries/${encodeURIComponent(server.id)}/drop`, { databases: leaving });
+          leaving.forEach((name) => server.excluded.add(name));
+        }
+        if (back.length) {
+          await api.post("/discoveries/source", { src_connection: connection, kind: "tables", databases: back, draft_id: server.id });
+          back.forEach((name) => server.excluded.delete(name));
+        }
       }
       setDraftIds([d.server?.id, d.named].filter((id): id is string => Boolean(id)));
       setDraftGeneration((g) => g + 1);
@@ -509,7 +561,8 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
     return syncing.current;
   };
   const wholeKey = whole.join("\n");
-  useEffect(() => { if (drafting) syncDrafts(); }, [drafting, wholeKey, wholeServer.on, wholeServer.filter]);
+  const excludedKey = wholeServer.excluded.join("\n");
+  useEffect(() => { if (drafting) syncDrafts(); }, [drafting, wholeKey, wholeServer.on, wholeServer.filter, excludedKey]);
   // The drafts' reads start as the choice is made and go on out of sight while the user chooses: their progress shows
   // only once Add the tables chosen hands them to New job, whose page shows it.
   useDraftReads(connection, draftIds, draftGeneration);
@@ -520,6 +573,7 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
     window.addEventListener("pagehide", leave);
     return () => { window.removeEventListener("pagehide", leave); leave(); };
   }, []);
+  const excludedDatabases = wholeServer.on ? wholeServer.excluded.map((d) => ({ server: connection, database: d })) : [];
   const label = () => (wholeServer.on ? `${connection}, ${chosenWords}` : `${chosenWords} on ${connection}`)
     + (counts ? ` (${countsLine.replace(/^Chosen: /, "")})` : "");
   const finish = async () => {
@@ -530,6 +584,7 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
       const ids = new Set([...allDrafts(), ...Object.values(read)]);
       const tables = handPicked.map(([d, keys]) => ({ server: connection, database: d, tables: keys }));
       const source = { discovery_ids: [...ids], whole_server: wholeServer.on, filter: wholeServer.on ? wholeServer.filter : "",
+                       excluded_databases: excludedDatabases,
                        databases: whole.map((d) => ({ server: connection, database: d })), tables };
       handed.current = true;
       onClose({ source, label: label(), connection, drafts: allDrafts() });
@@ -548,7 +603,9 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
         const request = throughWarehouse ? { whole_server: true, listing_id: discoveryId, filter: wholeServer.filter }
           : { whole_server: true, ...(pattern ? { pattern } : {}) };
         const got = await readTables(connection, request, onProgress);
-        if (got.failed.length) { setFailed(() => got.failed); setStep(2); return; }
+        // A database unticked under the server is read with it, but isn't the choice's: its failure stops nothing.
+        const failedChosen = got.failed.filter(([d]) => !excludedFrom(wholeServer, d));
+        if (failedChosen.length) { setFailed(() => failedChosen); setStep(2); return; }
         readServer = got.id; setServerRead(got.id);
       }
       const unread = whole.filter((d) => !read[d]);
@@ -567,6 +624,7 @@ export function DiscoverDialog({ onClose, drafts = false }: { onClose: (pick: Di
       }
       const tables = handPicked.map(([d, keys]) => ({ server: connection, database: d, tables: keys }));
       const source = { discovery_ids: [...ids], whole_server: wholeServer.on, filter: wholeServer.on ? wholeServer.filter : "",
+                       excluded_databases: excludedDatabases,
                        databases: whole.map((d) => ({ server: connection, database: d })), tables };
       onClose({ source, label: label() });
     } catch (e) { setError(e); setStep(2); } finally { setWaiting(null); }

@@ -57,7 +57,7 @@ def test_a_dropped_database_is_no_read_and_counts_in_no_progress_wait_or_failure
         assert q.WAREHOUSE_WORK["read"] in sql
     drop = q.draft_drop_sql()
     assert "jsonb_build_object('dropped', now()::text)" in drop and "- 'statement_id' - 'claimed_at'" in drop
-    assert "not coalesce((listing ->> 'whole_server')::boolean, false)" in drop
+    assert "whole_server" not in drop, "a database unticked under a whole server leaves that server's read too"
     assert "returning old.src_database, old.statement_id" in drop
     assert "do update set listing = lakefed_ingest.discovery.listing - 'dropped' - 'claimed_at' " \
            "where lakefed_ingest.discovery.listing ? 'dropped'" in q.warehouse_named_rows_sql(1)
