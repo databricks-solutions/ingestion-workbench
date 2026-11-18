@@ -3,13 +3,16 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 The repo is **Ingestion Workbench** (formerly lakefed-ingest and the EDW Ingestion Accelerator). It holds **two
-versions** of a metadata-driven framework that ingests external databases into Databricks Delta tables. Each is its own Databricks Asset Bundle. Job orchestration is the legacy version; all new
-development goes into the default version:
+versions** of a metadata-driven framework that ingests external databases into Databricks Delta tables. Each is its own Databricks Asset Bundle. Job orchestration is the legacy version, being retired: it is
+removed from the repository on 15 January 2027, and until then its bundle refuses every command without
+`--var legacy_migrating=true` (a `postinit` script in `job_orchestration/databricks.yml`; see `docs/deploy.md`, Moving
+off the job orchestration version). Make no changes to it beyond that retirement; all new development goes into the
+default version:
 
 | Version | Location | Bundle | Orchestration / compute / state |
 |---|---|---|---|
 | **Default** | repo root (`databricks.yml`, `resources/`, `src/lakefed_ingest/`, `tests/`) | `lakefed_ingest_v2` | One job task per `task_collection`, in-process threads + FAIR pools on a job cluster; Lakebase (Postgres) state; Spark JDBC; source adapters (SQL Server, Oracle, PostgreSQL, MySQL) + load strategies (SQL Server Change Tracking and watermark cursor, full reload) |
-| **Job orchestration** (legacy) | `job_orchestration/` | `lakefed_ingest` | Jobs `for_each` tasks; SQL warehouse + notebooks; Delta control table; Lakehouse Federation / `remote_query` |
+| **Job orchestration** (legacy, removed 15 January 2027) | `job_orchestration/` | `lakefed_ingest` | Jobs `for_each` tasks; SQL warehouse + notebooks; Delta control table; Lakehouse Federation / `remote_query` |
 
 The operations app (Databricks App: FastAPI backend + React/TypeScript frontend) for the default version lives in
 `app/` and is part of the root bundle (`app/resources/lakefed_ingest_app.yml`, included by `databricks.yml`; the app
@@ -54,10 +57,10 @@ requirements and the npm lockfile) cover the rest.
 databricks bundle deploy -t <target> -p <profile>
 databricks bundle run lakefed_ingest -t <target> -p <profile> --params task_collection=<name>
 
-# Job orchestration version
+# Job orchestration version (retiring): every command refuses without the setting
 cd job_orchestration
-databricks bundle deploy --target prod --profile PROD
-databricks bundle run --target prod --profile PROD
+databricks bundle deploy --target prod --profile PROD --var legacy_migrating=true
+databricks bundle run --target prod --profile PROD --var legacy_migrating=true
 ```
 
 ## Default version (repo root)
@@ -271,7 +274,9 @@ secret). See `README.md`, `docs/deploy.md`, `docs/monitoring.md`, `docs/lakebase
 
 ## Job orchestration version (`job_orchestration/`)
 
-All paths in this section are relative to `job_orchestration/`.
+All paths in this section are relative to `job_orchestration/`. This version is being retired (removed from the
+repository on 15 January 2027); `tests/legacy_guard_test.py` checks that its bundle refuses without
+`legacy_migrating=true`.
 
 ### Control Table
 

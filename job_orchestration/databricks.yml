@@ -1,4 +1,7 @@
-# This is a Databricks asset bundle definition for lakefed_ingest.
+# This is a Databricks asset bundle definition for lakefed_ingest, the job orchestration version.
+# This version is being retired: it is removed from the repository on 15 January 2027, and until then every bundle
+# command refuses unless legacy_migrating is true (the postinit script below). Jobs already deployed keep running.
+# See ../docs/deploy.md#moving-off-the-job-orchestration-version.
 # See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
 bundle:
   name: lakefed_ingest
@@ -7,8 +10,27 @@ bundle:
 include:
   - resources/*.yml
 
+# postinit runs once the CLI has signed in and resolved the variables and lookups, and before validate, deploy, run
+# or destroy does its work, so a command without legacy_migrating=true stops here. (preinit runs before the
+# variables are resolved, so it can't see the setting.) The CLI runs it with bash, or sh; on Windows without either it
+# falls back to cmd.exe, which can't run it, so the check then refuses even with the setting: use Git Bash or WSL.
+experimental:
+  scripts:
+    postinit: |
+      [ "${var.legacy_migrating}" = "true" ] && exit 0
+      echo "The job orchestration version of Ingestion Workbench is being retired and is removed from the repository on 15 January 2027." >&2
+      echo "New deployments are refused. Jobs you already deployed keep running until you move them." >&2
+      echo "To move your tables to the default version, see docs/deploy.md, 'Moving off the job orchestration version':" >&2
+      echo "https://github.com/databricks-solutions/ingestion-workbench/blob/main/docs/deploy.md#moving-off-the-job-orchestration-version" >&2
+      echo "While you move, add --var legacy_migrating=true to this command." >&2
+      exit 1
+
 # Variable declarations. These variables are assigned in the dev/prod targets below.
 variables:
+  legacy_migrating:
+    description: Set to true to validate, deploy, run or destroy this bundle while you move to the default version. Without
+      it every bundle command refuses. This version is removed from the repository on 15 January 2027.
+    default: "false"
   warehouse_id:
     description: Lookup ID of an existing warehouse
   concurrency:

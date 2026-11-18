@@ -1,6 +1,5 @@
 """The bundle's reads_cap: one variable (8 by default) passed to the app as READS_CAP, which warehouse_reads reads
-within bounds, falling back to READS_START_CAP for a deploy that still sets the old name. Read as text, like the other
-bundle tests."""
+within bounds. Read as text, like the other bundle tests."""
 from pathlib import Path
 
 import warehouse_reads as wr
@@ -42,20 +41,13 @@ def test_the_setting_is_read_within_bounds(monkeypatch):
 
 def test_the_cap_is_8_unless_a_setting_names_another(monkeypatch):
     monkeypatch.delenv("READS_CAP", raising=False)
-    monkeypatch.delenv("READS_START_CAP", raising=False)
     assert wr.cap_from_environment() == 8
     monkeypatch.setenv("READS_CAP", "6")
     assert wr.cap_from_environment() == 6
 
 
-def test_an_old_reads_start_cap_is_read_when_reads_cap_is_not_set_and_never_beats_it(monkeypatch):
+def test_the_old_reads_start_cap_is_not_read(monkeypatch):
+    """Every app this bundle deploys is told READS_CAP, so the old name has nothing left to stand in for."""
     monkeypatch.delenv("READS_CAP", raising=False)
     monkeypatch.setenv("READS_START_CAP", "12")
-    assert wr.cap_from_environment() == 12
-    monkeypatch.setenv("READS_START_CAP", "1")
-    assert wr.cap_from_environment() == wr.MIN_CAP, "within the same bounds"
-    monkeypatch.setenv("READS_CAP", "")
-    monkeypatch.setenv("READS_START_CAP", "10")
-    assert wr.cap_from_environment() == 10, "a blank READS_CAP is not set"
-    monkeypatch.setenv("READS_CAP", "6")
-    assert wr.cap_from_environment() == 6, "the new name wins"
+    assert wr.cap_from_environment() == 8

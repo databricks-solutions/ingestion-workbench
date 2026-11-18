@@ -1,23 +1,20 @@
 # How a run works
 
-How the root implementation ingests: why one task takes a whole group of tables, what one run does, the load types and sinks, and the settings that bound it. Deploying it is in [deploy.md](deploy.md); the Lakebase tables named here are in [lakebase_schema.md](lakebase_schema.md).
+How Ingestion Workbench ingests: why one task takes a whole group of tables, what one run does, the load types and sinks, and the settings that bound it. Deploying it is in [deploy.md](deploy.md); the Lakebase tables named here are in [lakebase_schema.md](lakebase_schema.md).
 
-## The two implementations
+## Sources and load types
 
-| | **Root implementation** (repository root) | **Job orchestration implementation** ([`job_orchestration/`](../job_orchestration/README.md)) |
-|---|---|---|
-| How it runs | One job task ingests a whole ingestion group (a `task_collection`) on a job cluster, with a thread pool and Spark FAIR scheduler pools | One task run per table or partition (Jobs `for_each`) |
-| Where its metadata lives | Lakebase (Postgres): control rows, checkpoints, the reseed queue, run history | A Delta control table |
-| How it reads a source | Through a Unity Catalog connection (`remote_query`), or Spark JDBC with a login per database from a secret scope | Lakehouse Federation, or `remote_query` through Unity Catalog connections |
-| Load types | SQL Server Change Tracking (`ct`) and a watermark column (`cursor`), each with a full or partitioned first copy; a `full` reload, partitioned or not, for every source. `cdc`, and `cursor` for sources other than SQL Server, are placeholders | Full, watermark incremental, partitioned full |
-| Sources | SQL Server (`ct`, `cursor`, `full`); Oracle, PostgreSQL, MySQL (`full`) | SQL Server, Oracle, PostgreSQL, Redshift, Synapse, IBM Db2 LUW |
-| Bundle | `lakefed_ingest_v2` | `lakefed_ingest` |
+SQL Server Change Tracking (`ct`) and a watermark column (`cursor`), each with a full or partitioned first copy, and a
+`full` reload, partitioned or not, for SQL Server, Oracle, PostgreSQL and MySQL. `cdc`, and `cursor` for sources other
+than SQL Server, are placeholders. A source is read through a Unity Catalog connection (`remote_query`), or through
+Spark JDBC with a login per database from a secret scope. The state (control rows, checkpoints, the reseed queue and
+run history) is in Lakebase.
 
-The job orchestration implementation remains supported. Use it for warehouse-only compute, watermark loads from a
-source other than SQL Server, or a source the root implementation doesn't support yet. Use the root implementation
-for many source databases or tables (thousands to hundreds of thousands), logins per database, many source databases
-written into shared tables, or SQL Server Change Tracking (incremental loads without a reliable watermark column,
-deletes included). The rest of this page covers the root implementation.
+The job orchestration version in `job_orchestration/` (one task run per table on a SQL warehouse, a Delta control
+table, Lakehouse Federation) is being retired: it is removed from the repository on 15 January 2027, and until then its
+bundle refuses new deployments without `--var legacy_migrating=true`. It is the only one that reads Redshift, Synapse
+and IBM Db2, takes watermark loads from sources other than SQL Server, or runs on a SQL warehouse alone; see
+[Moving off the job orchestration version](deploy.md#moving-off-the-job-orchestration-version).
 
 ## Why one task per collection
 
