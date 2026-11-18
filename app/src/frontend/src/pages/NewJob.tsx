@@ -68,7 +68,8 @@ export default function NewJob() {
   const [task, setTask] = useState<Row | null>(null);
   const [loadType, setLoadType] = useState("ct");
   // A null client_id or identity is sent as null: the server gives a new fan-in job its key and readable columns.
-  const [w, setW] = useState<Row>({ fan_in: false, write_mode_changes: "merge", write_mode_full: "merge", sink_catalog: "",
+  // The defaults are the server's (new_job.DEFAULTS): change logs into shared tables, merge for full reloads.
+  const [w, setW] = useState<Row>({ fan_in: true, write_mode_changes: "append", write_mode_full: "merge", sink_catalog: "",
                                     sink_schema: "", sink_table: "{table}", client_id: null,
                                     freshness_sla_minutes: "" });
   const [identity, setIdentity] = useState<[string, string][] | null>(null);

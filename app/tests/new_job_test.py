@@ -181,6 +181,61 @@ def test_a_job_made_before_keeps_the_database_as_its_key():
     assert nj.settings_of({})["client_id"] == "{database}"
 
 
+def test_a_new_job_appends_change_logs_into_shared_tables_unless_asked_otherwise():
+    settings = nj.settings_of({}, new_job=True)
+    assert (settings["fan_in"], settings["write_mode_changes"]) == (True, "append")
+    assert settings["write_mode_full"] == "merge"
+    assert settings["identity"] == js.SHARED_IDENTITY
+    rows = [line["row"] for line in nj.plan("Job", CSV, TABLE_ONLY, 4, new_job=True)["lines"]]
+    assert [(r["write_mode"], r["client_id"]) for r in rows] == [
+        ("append", "sql_a_eng_001"), ("append", "sql_a_eng_002"), ("append", "sql_a_eng_002")]
+    chosen = nj.settings_of({"fan_in": False, "write_mode_changes": "merge"}, new_job=True)
+    assert (chosen["fan_in"], chosen["write_mode_changes"]) == (False, "merge")
+    own_tables = nj.plan("Job", CSV, {**PLAIN, "fan_in": "no", "write_mode_changes": "merge"}, 4, new_job=True)
+    assert {(line["row"]["write_mode"], line["row"]["client_id"]) for line in own_tables["lines"]} == {("merge", None)}
+
+
+def test_a_new_job_reloads_its_full_tables_by_merge():
+    rows = [line["row"] for line in nj.plan("Job", CSV, {**TABLE_ONLY, "load_type": "full"}, 4, new_job=True)["lines"]]
+    assert {r["write_mode"] for r in rows} == {"merge"}
+
+
+def test_an_existing_job_keeps_how_it_writes_when_tables_are_added():
+    more = HEAD + 'sql_a,eng_009,gen,t0001,"id, amount",id\n'
+    merging = [dict(line["row"], id=i + 1, task_enabled=True) for i, line in enumerate(nj.plan(
+        "Job", CSV, {**FAN_IN, "write_mode_changes": "merge"}, 4, new_job=True)["lines"])]
+    assert nj.plan_for_job("Job", more, "ct", merging, 4)["lines"][0]["row"]["write_mode"] == "merge"
+    # A job of full reloads only says nothing of change-tracked tables: one added takes what Create was asked for,
+    # and a job made before records were kept takes the defaults every job had then.
+    full_only = [dict(line["row"], id=i + 1, task_enabled=True) for i, line in enumerate(nj.plan(
+        "Job", CSV, {**PLAIN, "load_type": "full", "fan_in": False}, 4)["lines"])]
+    added = nj.plan_for_job("Job", more, "ct", full_only, 4)["lines"][0]["row"]
+    assert (added["write_mode"], added["client_id"]) == ("merge", None)
+    asked = nj.settings_of({**PLAIN, "load_type": "full", "fan_in": False}, new_job=True)
+    assert asked["write_mode_changes"] == "append"
+    added = nj.plan_for_job("Job", more, "ct", full_only, 4, created_with=asked)["lines"][0]["row"]
+    assert (added["write_mode"], added["client_id"]) == ("append", None)
+    merging_asked = {**asked, "write_mode_changes": "merge"}
+    assert nj.plan_for_job("Job", more, "ct", full_only, 4, created_with=merging_asked)["lines"][0]["row"][
+        "write_mode"] == "merge"
+    assert nj.settings_of({})["fan_in"] is False and nj.settings_of({})["write_mode_changes"] == "merge"
+
+
+def test_a_jobs_own_tables_win_over_what_create_was_asked_for():
+    more = HEAD + 'sql_a,eng_009,gen,t0001,"id, amount",id\n'
+    merging = [dict(line["row"], id=i + 1, task_enabled=True) for i, line in enumerate(nj.plan(
+        "Job", CSV, {**FAN_IN, "write_mode_changes": "merge"}, 4, new_job=True)["lines"])]
+    asked = nj.settings_of(FAN_IN, new_job=True)
+    added = nj.plan_for_job("Job", more, "ct", merging, 4, created_with=asked)["lines"][0]["row"]
+    assert added["write_mode"] == "merge"
+
+
+def test_a_job_still_preparing_keeps_the_settings_create_was_asked_for():
+    stored = nj.settings_of({**PLAIN, "fan_in": False, "write_mode_changes": "merge"}, new_job=True)
+    again = nj.settings_of(stored, new_job=True)
+    assert (again["fan_in"], again["write_mode_changes"], again["identity"]) == (False, "merge", {})
+
+
 def test_a_new_key_the_rules_refuse_names_the_server_and_database():
     spaced = nj.plan("Engagement extraction", CSV.replace("eng_001", "eng 001", 1), FAN_IN, 4, new_job=True)
     assert spaced["lines"][0]["status"] == "invalid"
@@ -472,6 +527,12 @@ def test_a_csv_create_keeps_a_typed_target_name_and_refuses_one_unity_catalog_re
     assert len(_inserted_rows(client)) == 1
 
 
+def test_create_with_only_the_targets_writes_change_logs_into_shared_tables(client):
+    assert _create(client, dry_run=False, settings=TABLE_ONLY).json()["created"] is True
+    assert [(r["write_mode"], r["client_id"]) for r in _inserted_rows(client)] == [
+        ("append", "sql_a_eng_001"), ("append", "sql_a_eng_002"), ("append", "sql_a_eng_002")]
+
+
 def test_create_is_refused_while_a_line_is_invalid(client):
     body = client.post("/api/ingestion-jobs", json={"name": "Job", "csv": CSV, "settings": {**FAN_IN, "fan_in": False},
                                                      "dry_run": False}).json()
@@ -628,7 +689,7 @@ def job_client(monkeypatch):
     synced = []
     monkeypatch.setattr(main, "_sync", lambda sid, user: synced.append(sid) or [])
     c = TestClient(main.app, headers={"X-Forwarded-Email": "op@example.com"})
-    c.db, c.synced, c.q = fake, synced, q
+    c.db, c.synced, c.q, c.schedule, c.rows = fake, synced, q, schedule, rows
     return c
 
 
@@ -646,6 +707,16 @@ def test_adding_tables_previews_then_writes_them_and_the_new_groups(job_client):
     assert [r["src_database"] for r in inserted] == ["eng_009", "ops_01"]
     members = job_client.db.of("insert into lakefed_ingest.schedule_member")
     assert [m[1] for m in members] == body["summary"]["new_groups"] and job_client.synced == [7]
+
+
+def test_tables_added_to_a_job_of_full_reloads_take_the_write_mode_create_was_asked_for(job_client):
+    import preparing
+    job_client.rows[:] = [dict(r, load_type="full") for r in job_client.rows]
+    record = {"state": preparing.READY, "settings": nj.settings_of({**FAN_IN, "load_type": "full"}, new_job=True)}
+    job_client.schedule["options"] = {preparing.OPTION: record}
+    assert job_client.post("/api/ingestion-jobs/7/tables", json={"csv": MORE, "dry_run": False}).json()["applied"]
+    inserted = [dict(zip(job_client.q.CONTROL_INSERT_COLUMNS, p)) for p in job_client.db.of("insert into lakefed_ingest.control (")]
+    assert [r["write_mode"] for r in inserted] == ["append", "append"]
 
 
 def test_a_line_may_give_its_own_load_type_as_discovery_recommends_it():

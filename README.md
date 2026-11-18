@@ -75,8 +75,11 @@ Upgrades are the same command: pull and deploy. The deploy migrates the Lakebase
    **Discover on a source**: pick the Unity Catalog connection, let it test, tick whole servers, databases or single
    tables, and add them. Their tables and columns are read through the app's SQL warehouse while you go on with the
    rest of the page. **Import a CSV** is the other way in, for a list of tables you already have.
-2. **How it writes** and **When it runs.** Name the target catalog, schema and table pattern, and the cadence. The
-   preview counts the tables and groups, and says how far the read is.
+2. **How it writes** and **When it runs.** Name the target catalog, schema and table pattern, and the cadence. A new
+   job starts with Fan-in **Yes: shared tables** and Change-tracked tables **Append: change log**, the fastest set-up:
+   every database writes its rows into shared change-log tables. Choose **Merge: current state** for targets that
+   mirror the source, or **No: own tables** for a target per source table. The preview counts the tables and groups,
+   and says how far the read is.
 3. **Create.** Up to 5,000 tables are written before Create answers and the job is Ready. A bigger job, or one whose
    tables are still being read, is recorded at once: its page shows it **Preparing** (reading, writing, syncing) and
    then Ready. A database that can't be taken is set aside with the reason, and the rest go ahead.

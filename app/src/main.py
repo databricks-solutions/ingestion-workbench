@@ -2864,7 +2864,8 @@ def _add_job_tables(job_id: int, body: "JobTablesRequest", request: Request, inl
 
     def planned(rows, excluded):
         plan = _file_lines(nj.plan_for_job(job["name"], text, body.load_type, rows, _sizing(body, job), taken,
-                                           unity_catalog=_unity_catalog(job)), selected)
+                                           unity_catalog=_unity_catalog(job), created_with=_created_with(job)),
+                           selected)
         if plan["errors"]:
             raise HTTPException(422, {"errors": plan["errors"]})
         if not explicit and table_removal.leave_out(plan["lines"], excluded):
@@ -4996,7 +4997,7 @@ def _add_by_database(job_id: int, body: "JobTablesRequest", request: Request, ki
     _refuse_job_tables(job, groups, request)
     connection = _job_connection_row(job_id)
     inputs = nj.job_inputs(job["name"], db.query(q.groups_control_rows_sql(), (groups,)) if groups else [],
-                           _sizing(body, job), unity_catalog=_unity_catalog(job))
+                           _sizing(body, job), unity_catalog=_unity_catalog(job), created_with=_created_with(job))
     if inputs["errors"]:
         raise HTTPException(422, {"errors": inputs["errors"]})
     taken = {r["task_collection"] for r in db.query(q.collections_sql())}
@@ -5208,6 +5209,11 @@ def _sizing(body, job: Optional[dict] = None) -> placement.Groups:
     no request (body None), such as a re-discovery, the job's own."""
     stored = sch.options_of(job).get(TABLES_PER_GROUP_OPTION) if job else None
     return placement.sizing(getattr(body, "groups_per_server", None), getattr(body, "tables_per_group", None), stored)
+
+
+def _created_with(job: dict) -> dict:
+    """The settings Create was asked for, as the job's record keeps them; none for a job made before records."""
+    return (preparing.record_of(sch.options_of(job)) or {}).get("settings") or {}
 
 
 def _unity_catalog(job: dict) -> bool:
@@ -7285,7 +7291,8 @@ def _rediscover(sid: int, report=lambda **fields: None) -> dict:
             if not picked["add"]:
                 return outcome, []
             plan = nj.plan_for_job(job["name"], nj.csv_of(nj.DISCOVERY_COLUMNS, [r["fields"] for r in picked["add"]]),
-                                   "ct", job_rows, _sizing(None, job), taken, unity_catalog=_unity_catalog(job))
+                                   "ct", job_rows, _sizing(None, job), taken, unity_catalog=_unity_catalog(job),
+                                   created_with=_created_with(job))
             if plan["errors"]:
                 raise HTTPException(422, {"errors": plan["errors"]})
             written, warnings = _write_planned_tables(cur, job, plan, user, batch, skip_taken=True,
