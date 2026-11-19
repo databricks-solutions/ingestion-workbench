@@ -17,7 +17,8 @@ Recommendations (the reviewer can change any of them):
     an integer identity column. The app applies the size threshold (``load_partitioned``) at review.
 
 Catalog views only (sys.tables / columns / indexes / partitions / allocation_units /
-change_tracking_tables): no data is read and no permission beyond metadata visibility is needed.
+change_tracking_tables): no data is read and no permission beyond metadata visibility is needed. Whether the login
+can read each table (``can_read``) comes from HAS_PERMS_BY_NAME, which reads permissions, not rows (CAN_READ_SQL).
 A server's databases are listed through master. Pure Python except ``discover_database`` (unit-tested in
 tests/discovery_test.py).
 """
@@ -30,6 +31,26 @@ from typing import Dict, List
 import load_strategies as ls
 import source_adapters as sa
 
+# The column types Spark JDBC can't read (recommend leaves them out of the select list).
+UNSUPPORTED_TYPES = {"geography", "geometry", "hierarchyid", "sql_variant"}
+# The app's copy (app/src/source_catalog.py) has the same two texts; app/tests/read_check_test.py compares them.
+# A column the select list leaves out (recommend's rule): an unsupported base or user type, or a comma in the name.
+_UNSUPPORTED_SQL_TYPES = ", ".join(f"'{name}'" for name in sorted(UNSUPPORTED_TYPES))
+UNREADABLE_COLUMN_SQL = (f"(ISNULL(LOWER(TYPE_NAME(c.system_type_id)), '') IN ({_UNSUPPORTED_SQL_TYPES}) "
+                         f"OR ISNULL(LOWER(TYPE_NAME(c.user_type_id)), '') IN ({_UNSUPPORTED_SQL_TYPES}) "
+                         "OR CHARINDEX(',', c.name) > 0)")
+# Whether the login can read a table as ingestion reads it: SELECT on every column of its select list, which both the
+# schema step of a Spark JDBC read and the read itself need. One HAS_PERMS_BY_NAME per table, column by column only
+# for a table with column-level grants or denies (source_catalog.CAN_READ_SQL says why); NULL counts as not readable.
+CAN_READ_SQL = ("CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.database_permissions p "
+                "  WHERE p.class = 1 AND p.major_id = t.object_id AND p.minor_id > 0) "
+                "THEN CASE WHEN NOT EXISTS (SELECT 1 FROM sys.columns c "
+                f"  WHERE c.object_id = t.object_id AND NOT {UNREADABLE_COLUMN_SQL} "
+                "  AND ISNULL(HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(t.name), 'OBJECT', 'SELECT', "
+                "c.name, 'COLUMN'), 0) = 0) THEN 1 ELSE 0 END "
+                "ELSE ISNULL(HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(t.name), 'OBJECT', 'SELECT'), 0) "
+                "END AS INT)")
+
 TABLES_SQL = (
     "SELECT t.object_id AS oid, s.name AS sch, t.name AS tbl, "
     "CAST(ISNULL((SELECT SUM(p.rows) FROM sys.partitions p "
@@ -37,7 +58,8 @@ TABLES_SQL = (
     "CAST(ISNULL((SELECT SUM(a.total_pages) * 8 / 1024.0 FROM sys.partitions p "
     "  JOIN sys.allocation_units a ON a.container_id = p.partition_id "
     "  WHERE p.object_id = t.object_id), 0) AS DECIMAL(18, 2)) AS size_mb, "
-    "CAST(CASE WHEN ct.object_id IS NULL THEN 0 ELSE 1 END AS INT) AS ct_enabled "
+    "CAST(CASE WHEN ct.object_id IS NULL THEN 0 ELSE 1 END AS INT) AS ct_enabled, "
+    f"{CAN_READ_SQL} AS can_read "
     "FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id "
     "LEFT JOIN sys.change_tracking_tables ct ON ct.object_id = t.object_id "
     "WHERE t.is_ms_shipped = 0"
@@ -86,7 +108,6 @@ def databases_sql(pattern: str = "") -> str:
     return DATABASES_SQL.format(name=f" AND name LIKE N'{pattern}'" if pattern else "")
 
 
-UNSUPPORTED_TYPES = {"geography", "geometry", "hierarchyid", "sql_variant"}
 PARTITION_TYPES = {"tinyint", "smallint", "int", "bigint", "decimal", "numeric",
                    "date", "datetime", "datetime2", "smalldatetime"}
 ROWVERSION_TYPES = {"timestamp", "rowversion"}
@@ -159,8 +180,10 @@ def assemble(tables, columns, pks) -> List[dict]:
     for t in tables:
         oid = int(t["oid"])
         rec = recommend(t, cols_by.get(oid, []), pk_by.get(oid, []))
+        can_read = None if t.get("can_read") is None else bool(int(t["can_read"]))
         out.append({"src_schema": t["sch"], "src_table": t["tbl"], "row_count": int(t["row_count"] or 0),
-                    "size_mb": float(t["size_mb"] or 0), "ct_enabled": bool(int(t["ct_enabled"] or 0)), **rec})
+                    "size_mb": float(t["size_mb"] or 0), "ct_enabled": bool(int(t["ct_enabled"] or 0)),
+                    "can_read": can_read, **rec})
     return sorted(out, key=lambda r: (r["src_schema"].lower(), r["src_table"].lower()))
 
 

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Row } from "../api";
 import { retryLine } from "../runDialog";
-import { Cols, Cut, CutCopy, ErrorBox, Notice, Section, fmtInt, fmtTime, oneLine, plural, useConfirm, type ConfirmRequest } from "../components";
+import { Cols, CopyButton, Cut, ErrorBox, Notice, Section, Tip, fmtInt, fmtTime, oneLine, plural, useConfirm, type ConfirmRequest } from "../components";
 
 /** The failing tables as a job's runs list keeps its columns: the table and the source message share the spare width. */
 const WIDTHS = [null, 140, 84, null, 160, 64, 255] as const;
@@ -15,13 +15,31 @@ const KIND_NOTE: Record<string, string> = {
     + "then failed. At 0, the default, it fails at once.",
 };
 
-const SHOWN_MESSAGE = 240;
+/** The job's failures by cause, as the jobs list groups them (queries.group_errors): each cause in words, how many tables
+ * and databases it holds, and the source's own reason first, as a Databricks job run's page puts the error above its
+ * output. The full message, with Spark's wrapper and the stack, is on hover and on the copy button. */
+export function FailureCauses({ causes }: { causes: Row[] }) {
+  return (
+    <div className="failure-causes">
+      {causes.map((c) => (
+        <div key={`${c.error_class}\u001f${c.signature}`} className="attention-row">
+          <div className="title">{c.label} <span className="muted">{fmtInt(c.tables)} {plural(c.tables, "table")} in{" "}
+            {fmtInt(c.databases.length)} {plural(c.databases.length, "database")}</span></div>
+          <div className="reason"><Tip text={c.example} focusable>{c.reason || c.example}</Tip>{" "}
+            <CopyButton text={c.example} label="Copy the full message" /></div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** The job's failing tables: those whose last load failed and that have not loaded since. Shown only when there are some.
  * Retry now starts one ingest run for the table's database alone; Disable turns this table off in this job, in this
  * database; Remove deletes the table's ingestion state from the job (the delete job does it) and keeps its target table.
- * Each row says what failed, its class and kind, when it began failing and how many runs failed it. */
-export function FailingTables({ jobId, runRefused, changeRefused, removeRefused }: { jobId: string;
+ * Above them, the job's failures by cause. Each row says what failed: the source's own reason first (queries.
+ * source_reason), the full message on hover and copy, its class and kind, when it began failing and how many runs
+ * failed it. */
+export function FailingTables({ jobId, causes, runRefused, changeRefused, removeRefused }: { jobId: string; causes?: Row[];
   runRefused?: string | null; changeRefused?: string | null; removeRefused?: string | null }) {
   const qc = useQueryClient();
   const confirm = useConfirm();
@@ -60,6 +78,7 @@ export function FailingTables({ jobId, runRefused, changeRefused, removeRefused 
       <ErrorBox error={retry.error} />
       <ErrorBox error={disable.error} />
       <ErrorBox error={remove.error} />
+      {(causes ?? []).length > 0 && <FailureCauses causes={causes!} />}
       <div className="table-wrap"><table {...oneLine(WIDTHS, "dense")}>
         <Cols widths={WIDTHS} />
         <thead><tr><th>Table and database</th><th>Error class</th><th>Kind</th><th>Source message</th><th>Failing since</th>
@@ -78,8 +97,9 @@ export function FailingTables({ jobId, runRefused, changeRefused, removeRefused 
                 <td><Cut text={row.error_class} tipOnlyWhenCut /></td>
                 <td title={row.error_kind ? KIND_NOTE[row.error_kind] : "Recorded for failures after this version; not known for earlier ones."}>
                   {row.error_kind ?? <span className="muted">not recorded</span>}</td>
-                <td className="small"><CutCopy text={row.message} label="Copy the source message"
-                  shown={row.message.length > SHOWN_MESSAGE ? `${row.message.slice(0, SHOWN_MESSAGE)}…` : row.message} /></td>
+                {/* The source's reason is what to act on, so it wraps (at spaces) rather than being cut to one line. */}
+                <td className="small reason"><Tip text={row.message} focusable>{row.reason || row.message}</Tip>{" "}
+                  <CopyButton text={row.message} label="Copy the full message" /></td>
                 <td>{row.failing_since ? fmtTime(row.failing_since)
                   : <span className="muted">before the last 30 days</span>}</td>
                 <td className="num"><Cut text={`${fmtInt(row.failures)} ${plural(row.failures, "failure")}`}>

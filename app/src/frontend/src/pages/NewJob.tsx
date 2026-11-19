@@ -206,7 +206,7 @@ export default function NewJob() {
               {draftCreateBlock(reading) && <Notice tone="bad">{draftCreateBlock(reading)}:<ul>
                 {(reading?.failed_databases ?? []).slice(0, 20).map(([d, why]: [string, string]) => <li key={d}><b>{d}</b>: {why}</li>)}</ul></Notice>}
               {Number(reading?.left_out) > 0 && <p className="muted">The whole server leaves out {fmtInt(reading.left_out)}{" "}
-                {plural(reading.left_out, "database")} the connection's login can't open.</p>}
+                {plural(reading.left_out, "database")} the connection's login can't open or read.</p>}
               {discoveringDatabases !== null && <Busy label="Reading tables" />}
               <div className="table-wrap"><table {...oneLine(CHOSEN_WIDTHS, "tree")}>
                 <Cols widths={CHOSEN_WIDTHS} />

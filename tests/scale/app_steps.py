@@ -416,8 +416,8 @@ def _upload_text(text: str, lines_hint: Optional[int]) -> UploadRun:
 
 def _upload_columns() -> List[str]:
     """The discovery columns an upload takes: the file reads through the connection chosen before it, so not the
-    server's own columns (new_job.UPLOAD_REFUSED_COLUMNS)."""
-    return [c for c in nj.DISCOVERY_COLUMNS if c not in nj.UPLOAD_REFUSED_COLUMNS]
+    server's own columns (new_job.UPLOAD_REFUSED_COLUMNS), and not can_read, which only a discovery finds out."""
+    return [c for c in nj.DISCOVERY_COLUMNS if c not in nj.UPLOAD_REFUSED_COLUMNS and c != "can_read"]
 
 
 def _repeated_csv(line_count: int, columns: Optional[List[str]] = None) -> str:

@@ -457,7 +457,7 @@ export default function IngestionJob() {
       {live.data?.active && <RunningNow live={live.data} />}
       {j && <RediscoveryRecord rediscovery={j.rediscovery} requesting={rediscover.isPending} error={rediscover.error}
         refused={j.change_blocked} onRunNow={() => rediscover.mutate()} />}
-      {j && <FailingTables jobId={id} runRefused={j.run_now?.refused} changeRefused={j.change_blocked}
+      {j && <FailingTables jobId={id} causes={j.causes} runRefused={j.run_now?.refused} changeRefused={j.change_blocked}
         removeRefused={j.delete_blocked} />}
       <Section title="Ingestion runs" note="Newest first; one row per trigger. Open a run for the groups it ran."
         actions={<span className="pager-buttons">

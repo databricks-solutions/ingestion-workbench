@@ -327,6 +327,10 @@ tr:hover .copy-button, .copy-button:focus-visible, .copy-button:focus { opacity:
 .attention-row:first-of-type { border-top: 0; padding-top: 0; }
 .attention-row .title { font-weight: var(--db-font-weight-semibold); }
 .attention-row .example { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A failure's reason from the source: read whole to act on it, so it wraps at spaces, in the cause list and in a failing
+   table's row alike; the full message is on hover and copy. */
+.failure-causes { margin-bottom: var(--db-space-3); }
+.attention-row .reason, table.data.one-line td.reason { white-space: normal; }
 .metric-value.small-value { font-size: var(--db-font-size-md); }
 .stamp.stale { color: var(--bad); font-weight: var(--db-font-weight-semibold); max-width: 420px; display: inline-block; }
 table.data.dense th, table.data.dense td { padding-left: var(--db-space-2); padding-right: var(--db-space-2); }
@@ -395,7 +399,8 @@ details.advanced .compute h4 { margin: var(--db-space-3) 0 var(--db-space-2); }
 .discover .radio-row { display: flex; gap: 8px; align-items: center; font-weight: var(--db-font-weight-semibold); margin: var(--db-space-2) 0; }
 .discover .radio-body { margin: 0 0 var(--db-space-3) 24px; }
 .discover .tree-pick { max-height: 46vh; overflow: auto; }
-/* A database the connection's login can't open: greyed out and not choosable; its reason shows on hover. */
+/* A database the connection's login can't open, or a table it can't read: greyed out and not choosable; its reason
+   shows on hover. */
 .tree-pick tr.closed td.name { color: var(--muted); }
 .tree-pick tr.closed .tri-box { opacity: .35; pointer-events: none; }
 .discover .pick-counts { margin: var(--db-space-1) 0 var(--db-space-2); }

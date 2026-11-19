@@ -1,5 +1,6 @@
 """Table discovery's SQL Server catalog reads, as the app runs them: the server's database list (DATABASES_SQL) and
-TABLE_SUMMARY_SQL, one query per database with one row per user table. assemble_summary turns those rows into the same
+TABLE_SUMMARY_SQL, one query per database with one row per user table, which also says whether the connection's
+login can read each table (CAN_READ_SQL). assemble_summary turns those rows into the same
 recommendations as the engine's discovery.assemble (load type, select list, primary key, cursor column, partition
 candidate, notes).
 
@@ -73,6 +74,23 @@ ROWVERSION_SQL_TYPES = ", ".join(f"'{name}'" for name in sorted(ROWVERSION_TYPES
 UNREADABLE_COLUMN_SQL = (f"(ISNULL(LOWER(TYPE_NAME(c.system_type_id)), '') IN ({UNSUPPORTED_SQL_TYPES}) "
                          f"OR ISNULL(LOWER(TYPE_NAME(c.user_type_id)), '') IN ({UNSUPPORTED_SQL_TYPES}) "
                          "OR CHARINDEX(',', c.name) > 0)")
+# Whether the connection's login can read a table as the ingest job reads it: Spark JDBC first asks the source for the
+# schema of a SELECT of the table's select list, then reads that SELECT, and SQL Server refuses both unless the login
+# has SELECT on every column of it. HAS_PERMS_BY_NAME gives the login's effective permission, with its roles
+# (db_datareader), grants and denies; NULL (a name it can't resolve) counts as not readable. Metadata visibility alone
+# (VIEW DEFINITION) lists a table without this. One check per table: SELECT on the table. Only a table with
+# column-level grants or denies (sys.database_permissions rows with a minor_id) is checked column by column, over the
+# columns of its select list (those UNREADABLE_COLUMN_SQL doesn't leave out), so the cost grows with tables, not
+# columns. A column-level entry the login can't see (a deny to a role it isn't in) isn't looked at; the read then
+# fails as before. Reads t (sys.tables) and s (sys.schemas).
+CAN_READ_SQL = ("CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.database_permissions p "
+                "  WHERE p.class = 1 AND p.major_id = t.object_id AND p.minor_id > 0) "
+                "THEN CASE WHEN NOT EXISTS (SELECT 1 FROM sys.columns c "
+                f"  WHERE c.object_id = t.object_id AND NOT {UNREADABLE_COLUMN_SQL} "
+                "  AND ISNULL(HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(t.name), 'OBJECT', 'SELECT', "
+                "c.name, 'COLUMN'), 0) = 0) THEN 1 ELSE 0 END "
+                "ELSE ISNULL(HAS_PERMS_BY_NAME(QUOTENAME(s.name) + '.' + QUOTENAME(t.name), 'OBJECT', 'SELECT'), 0) "
+                "END AS INT)")
 # One row per user table. remote_query reads this text as a subquery, so there is no WITH and no top-level ORDER BY
 # (ORDER BY inside a FOR XML or TOP subquery is fine). The lists use STUFF with FOR XML PATH, TYPE read back by
 # .value, so a name with & < or > comes back as written on every SQL Server version.
@@ -81,6 +99,7 @@ TABLE_SUMMARY_SQL = (
     "CAST(ISNULL((SELECT SUM(p.rows) FROM sys.partitions p "
     "  WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)), 0) AS BIGINT) AS row_count, "
     "CAST(CASE WHEN ct.object_id IS NULL THEN 0 ELSE 1 END AS INT) AS ct_enabled, "
+    f"{CAN_READ_SQL} AS can_read, "
     "STUFF((SELECT ', ' + c.name FROM sys.columns c "
     f"  WHERE c.object_id = t.object_id AND NOT {UNREADABLE_COLUMN_SQL} "
     "  ORDER BY c.column_id FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, '') AS select_cols, "
@@ -125,8 +144,14 @@ def assemble_summary(rows) -> List[dict]:
     for row in rows:
         out.append({"src_schema": row["sch"], "src_table": row["tbl"], "row_count": int(row["row_count"] or 0),
                     "size_mb": None, "ct_enabled": bool(int(row["ct_enabled"] or 0)),
-                    **_recommend_summary_row(row)})
+                    "can_read": can_read_of(row.get("can_read")), **_recommend_summary_row(row)})
     return sorted(out, key=lambda row: (row["src_schema"].lower(), row["src_table"].lower()))
+
+
+def can_read_of(value):
+    """CAN_READ_SQL's answer as True or False (a warehouse gives it as text), or None when the read had no such column
+    (a read made before the check), so nothing is said about the table."""
+    return None if value is None or value == "" else bool(int(value))
 
 
 def _split_names(joined) -> List[str]:

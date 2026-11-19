@@ -822,12 +822,14 @@ def source_overview(kind: str, source_id: str, filter: str = "", offset: int = 0
 @app.get("/api/sources/{kind}/{source_id}/tables")
 def source_tables(kind: str, source_id: str, server: str, database: str, search: str = "", offset: int = 0,
                   limit: int = 50):
-    """One page of a database's tables in an upload or a discovery, those matching the search."""
+    """One page of a database's tables in an upload or a discovery, those matching the search, each with whether the
+    connection's login can read it, and how many of them it can't (unreadable), for the page to say so."""
     param = _source_param(kind, source_id)
     limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
     rows = db.query(q.source_tables_sql(kind), (param, server, database, search, limit, offset))
-    return {"tables": [{k: v for k, v in r.items() if k != "total"} for r in rows],
-            "total": rows[0]["total"] if rows else 0, "offset": offset, "limit": limit}
+    return {"tables": [{k: v for k, v in r.items() if k not in ("total", "unreadable")} for r in rows],
+            "total": rows[0]["total"] if rows else 0, "unreadable": rows[0]["unreadable"] if rows else 0,
+            "offset": offset, "limit": limit}
 
 
 class SelectedDatabase(BaseModel):
@@ -1461,6 +1463,12 @@ def _jobs_view() -> dict:
     return _shared("jobs_view", compute)
 
 
+def _job_causes(job_id: int) -> List[dict]:
+    """A failing job's failures by cause in its latest job run with failed tables, the ones the jobs list builds
+    (_jobs_view, shared), so the job page says why it fails as the list does: none for a job that isn't failing."""
+    return next((row.get("causes") or [] for row in _jobs_view()["jobs"] if row.get("id") == job_id), [])
+
+
 JOB_FILTERS = ("all", "running", "failing", "late", "paused", "attention")
 # The sums a group row shows: its databases, enabled tables, late databases, and its tables by state (rollup.STATES).
 GROUP_SUMS = ("databases", "enabled_tables", "late_databases") + rollup.STATES
@@ -1594,8 +1602,9 @@ def permissions(request: Request):
 def ingestion_job(job_id: int, request: Request):
     """One ingestion job's details: its schedule and members (wrapper jobs, next start), its tables by
     state, its last job run that ran (however long ago), the median speed over its last 24 job runs, its p95 job
-    run time over 7 days, and its groups with their last group run and p95 run time. Job runs are placed once over
-    7 days; the speed is over the newest 24 finished ones."""
+    run time over 7 days, and its groups with their last group run and p95 run time, and, while it is failing, its
+    failures by cause as the jobs list has them (causes). Job runs are placed once over 7 days; the speed is over the
+    newest 24 finished ones."""
     job = _schedule(job_id)
     now = datetime.now(timezone.utc)
     _, members = _schedules()
@@ -1632,7 +1641,7 @@ def ingestion_job(job_id: int, request: Request):
             "next_start": min(next_starts).isoformat() if next_starts and not job.get("paused") else None,
             "median_speed_tables_per_min": speeds[len(speeds) // 2] if speeds else None, "speed_job_runs": len(speeds),
             "p95_took_s": sorted(week)[min(len(week) - 1, int(0.95 * len(week)))] if week else None,
-            "groups_detail": group_rows, "read_at": now.isoformat(),
+            "groups_detail": group_rows, "read_at": now.isoformat(), "causes": _job_causes(job["id"]),
             # For the Run now button: why it can't start now (None when it can), whether a run is going (the button
             # is then Cancel run, which the run permission also gates), and what one run starts.
             "run_now": {"blocked": refusals["run"] or _run_now_blocker(job, mine), "refused": refusals["run"],
@@ -4281,7 +4290,8 @@ class RegisterRequest(BaseModel):
 @app.post("/api/discoveries/{discovery_id}/register")
 def register(discovery_id: str, body: RegisterRequest, request: Request):
     """Validate (dry_run) or register the included tables. Rows are rebuilt from the stored discovery
-    and only the reviewer's editable fields are applied (queries.merge_review_edits)."""
+    and only the reviewer's editable fields are applied (queries.merge_review_edits). A table the connection's login
+    couldn't read when it was discovered is invalid, as in a job's plan (new_job.UNREADABLE_TABLE)."""
     taken = {r["task_collection"] for r in db.query(q.collections_sql())}
     connection = _jdbc_source(Selection(discovery_id=discovery_id, whole_server=True))
     if body.task_collection in taken and connection is not None:
@@ -4292,10 +4302,13 @@ def register(discovery_id: str, body: RegisterRequest, request: Request):
     rows = q.merge_review_edits(q.review_rows(discovered, body.shared.model_dump(), unity_catalog=unity_catalog),
                                 body.edits)
     chosen = [r for r in rows if r.get("include")]
+    unreadable = {q.review_key(r) for r in discovered if r.get("can_read") is False}
     results, valid = [], []
     for r in chosen:
         row = q.control_row_from_review(r, body.task_collection)
         errs = q.validate_control_row(row) + js.typed_name_errors(row, unity_catalog)
+        if q.review_key(r) in unreadable:
+            errs.append(nj.UNREADABLE_TABLE)
         name = ".".join(q.review_key(r))
         if errs:
             results.append({"table": name, "status": "invalid", "errors": errs})
@@ -6262,15 +6275,38 @@ def _prepare_databases(sid: int, held: threading.Event, job: dict, source: Prepa
             if plan["errors"]:
                 raise PrepareRefused(HTTPException(422, {"errors": plan["errors"][:20]}))
             invalid = [line for line in plan["lines"] if line["status"] == "invalid"]
+            if invalid and kind == "discovery" and _unreadable_read(job, unit, invalid):
+                entries.append(preparing.entry(unit.server, unit.database, preparing.UNREADABLE, _invalid_why(invalid)))
+                counts[preparing.UNREADABLE] += 1
+                continue
             if invalid:
-                entries.append(preparing.entry(unit.server, unit.database, preparing.CLASH,
-                                               f"{invalid[0]['table']}: {'; '.join(invalid[0]['errors'])}"))
+                entries.append(preparing.entry(unit.server, unit.database, preparing.CLASH, _invalid_why(invalid)))
                 continue
             checked.append(by_database.Checked(unit, len(rows), plan if keep else None))
     return entries, counts, (checked, keep, lambda units: [
         (unit, by_database.plan_database(job["name"], source.settings, rows, columns, groups_of, taken, own,
                                          group_of=group_of, new_job=True, unity_catalog=_unity_catalog(job)))
         for unit, rows in _rows_of_units(kind, param, units) if rows])
+
+
+def _unreadable_read(job: dict, unit, invalid: List[dict]) -> bool:
+    """Whether a database being prepared was set aside as one that couldn't be read: some of its tables are ones the
+    login can't read (new_job.UNREADABLE_TABLE), so its claimed draft row is failed with why
+    (prepare_unreadable_read_sql). Read again then reads it again after a grant; another clash is not one."""
+    if not any(nj.UNREADABLE_TABLE in line["errors"] for line in invalid):
+        return False
+    failed = db.query(q.prepare_unreadable_read_sql(), (_invalid_why(invalid), _job_discovery_ids(job),
+                                                        str(int(job["id"])), rediscovery.server_key(unit.server),
+                                                        str(unit.database or "").lower()))
+    return bool(failed)
+
+
+def _invalid_why(invalid: List[dict]) -> str:
+    """Why a database is set aside for its lines that can't be taken: the first table and its errors, and how many
+    more there are, so a database whose login can read none of its tables doesn't read as one bad table."""
+    first = f"{invalid[0]['table']}: {'; '.join(invalid[0]['errors'])}"
+    more = len(invalid) - 1
+    return f"{first} (and {more:,} more {nj.plural(more, 'table')})" if more else first
 
 
 def _prepare_database_lines(sid: int, held: threading.Event, selected: dict) -> Optional[dict]:
@@ -6331,8 +6367,7 @@ def _prepare_file(sid: int, held: threading.Event, job: dict, source: PreparedSo
             continue
         invalid = [line for line in lines if line["status"] == "invalid"]
         if invalid:
-            entries.append(preparing.entry(server, database, preparing.CLASH,
-                                           f"{invalid[0]['table']}: {'; '.join(invalid[0]['errors'])}"))
+            entries.append(preparing.entry(server, database, preparing.CLASH, _invalid_why(invalid)))
             continue
         groups = sorted({line["row"]["task_collection"] for line in lines if line["status"] == "valid"})
         checked.append(by_database.Checked(by_database.Unit(server, database, True), len(lines),

@@ -170,27 +170,48 @@ def _write_mode(load_type: str, settings: dict) -> str:
     return settings["write_mode_changes"] if load_type in js.CHANGE_LOAD_TYPES else "merge"
 
 
-def _line_load_types(text: str):
-    """(the file without its load_type column, {line number: load type}). A discovered table carries the load type
-    discovery recommends for it; a plain CSV has none, and every line takes the job's. The lines are numbered as
-    config_import.plan_import numbers the file it is given: from 2, counting only the lines with a value left once the
-    load_type column is gone, so a blank or all-empty line shifts no table onto another's load type."""
+# The columns a discovered table carries that Import CSV doesn't read: the load type discovery recommends, and whether
+# the connection's login could read the table.
+LINE_COLUMNS = ("load_type", "can_read")
+# Why a discovered table the connection's login can't read is refused (discovered_table.can_read false). Listing a
+# table takes only metadata rights, so a login may list tables it can't read; a job made from them fails on each.
+UNREADABLE_TABLE = ("the connection's login can't read this table (SQL Server gives it no SELECT on it), so every "
+                    "run would fail on it: leave it out, or ask the server's admin to grant the login SELECT on it "
+                    "and read its database again")
+
+
+def _line_columns(text: str, names=LINE_COLUMNS):
+    """(the file without the named columns, {column: {line number: value}}). A discovered table carries its load type
+    and whether it can be read; a plain CSV has neither, and every line takes the job's load type. The lines are
+    numbered as config_import.plan_import numbers the file it is given: from 2, counting only the lines with a value
+    left once those columns are gone, so a blank or all-empty line shifts no table onto another's values."""
     reader = csv.reader(io.StringIO(text.lstrip("\ufeff")))
     rows = list(reader)
-    if not rows or "load_type" not in [h.strip() for h in rows[0]]:
-        return text, {}
-    at = [h.strip() for h in rows[0]].index("load_type")
-    types, number = {}, 1
+    header = [h.strip() for h in rows[0]] if rows else []
+    found = {name: header.index(name) for name in names if name in header}
+    if not found:
+        return text, {name: {} for name in names}
+    dropped = set(found.values())
+    kept = lambda row: [cell for at, cell in enumerate(row) if at not in dropped]
+    values: Dict[str, Dict[int, str]] = {name: {} for name in names}
+    number = 1
     for row in rows[1:]:
-        if not any(cell.strip() for cell in row[:at] + row[at + 1:]):
+        if not any(cell.strip() for cell in kept(row)):
             continue
         number += 1
-        load_type = row[at].strip() if at < len(row) else ""
-        if load_type:
-            types[number] = load_type
+        for name, at in found.items():
+            value = row[at].strip() if at < len(row) else ""
+            if value:
+                values[name][number] = value
     out = io.StringIO()
-    csv.writer(out, lineterminator="\n").writerows([row[:at] + row[at + 1:] for row in rows])
-    return out.getvalue(), types
+    csv.writer(out, lineterminator="\n").writerows([kept(row) for row in rows])
+    return out.getvalue(), values
+
+
+def unreadable(value: Optional[str]) -> bool:
+    """Whether a line's can_read value says the login can't read its table. Blank (an uploaded line, or a discovery
+    made before the check) says nothing."""
+    return str(value or "").strip().lower() in ("false", "f", "0")
 
 
 def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int] = None,
@@ -222,7 +243,8 @@ def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int]
         out["errors"].append(f"groups per server must be from 1 to {MAX_GROUPS_PER_SERVER}")
     if out["errors"]:
         return out
-    text, line_types = _line_load_types(text)
+    text, line_values = _line_columns(text)
+    line_types = line_values["load_type"]
     # The file is read as Import CSV reads it; its sink names are made again below, with the job's templates.
     read = ci.plan_import(text, "_new", {"src_type": settings["src_type"], "load_type": settings["load_type"],
                                          "use_remote_query": False, "write_mode": "merge", "fan_in": False,
@@ -241,6 +263,8 @@ def plan(job_name: str, text: str, given: dict, groups_per_server: Optional[int]
         # The reader judges client_id against its placeholder settings, not this job's fan-in, so its client_id
         # messages are left out; the row is checked once, below, with the job's settings applied.
         problems = [e for e in line["errors"] if not e.startswith("client_id ")]
+        if unreadable(line_values["can_read"].get(line["line"])):
+            problems.append(UNREADABLE_TABLE)
         row["use_remote_query"] = bool(row.get("src_connection")) and not row.get("src_host")
         if row.get("src_connection") and row.get("src_host"):
             problems.append("give the UC connection or the host, not both")
@@ -479,7 +503,7 @@ def csv_of(columns: List[str], rows: List[dict]) -> str:
 
 
 DISCOVERY_COLUMNS = ("src_connection", "src_host", "src_port", "secret_key", "src_database", "src_schema", "src_table",
-                     "select_list", "primary_key", "cursor_column", "load_type")
+                     "select_list", "primary_key", "cursor_column", "load_type", "can_read")
 
 
 NO_TABLES = "the selection takes no tables"

@@ -171,6 +171,7 @@ comment on column lakefed_ingest.discovered_table.cursor_column is 'Recommended 
 comment on column lakefed_ingest.discovered_table.partition_candidate is 'A column a partitioned load could split on: the first key column if it is an integer or date, else an integer identity column.';
 comment on column lakefed_ingest.discovered_table.notes is 'Notes on the recommendation.';
 comment on column lakefed_ingest.discovered_table.discovered_at is 'When the table was discovered.';
+comment on column lakefed_ingest.discovered_table.can_read is 'Whether the connection''s login could read the table when it was discovered: SELECT on every column of its select list (SQL Server HAS_PERMS_BY_NAME). False: a job is refused the table. NULL: not checked (discovered before this column).';
 
 comment on table lakefed_ingest.control_change is 'Change log of the operations app edits to tables (control) and ingestion jobs (schedules), one row per change, written in the same transaction as the change. Edits made directly with SQL are not logged.';
 comment on column lakefed_ingest.control_change.id is 'Primary key.';

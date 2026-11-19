@@ -89,7 +89,7 @@ def discover(catalog: server_catalog.ServerCatalog, pattern: str = "",
 # The columns discover_tables.ipynb writes to lakefed_ingest.discovered_table, in its order;
 # scale_test.py checks that the two lists agree.
 TABLE_COLS = ["discovery_id", "src_database", "src_schema", "src_table", "row_count", "size_mb", "ct_enabled",
-              "primary_key", "select_list", "excluded_columns", "rowversion_column", "identity_column",
+              "can_read", "primary_key", "select_list", "excluded_columns", "rowversion_column", "identity_column",
               "load_type", "cursor_column", "partition_candidate", "notes"]
 DISCOVERY_ID = "scale-discovery"
 START_SQL = ("insert into lakefed_ingest.discovery (discovery_id, src_type, src_connection, src_host, src_port, "

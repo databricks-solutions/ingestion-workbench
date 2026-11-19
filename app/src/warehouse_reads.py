@@ -1,5 +1,6 @@
 """Discovery's per-database statements on the SQL warehouse: whether the connection's login can open each database
-(and how many tables it has), and the tables of the databases chosen.
+(how many tables it has, and whether it can read any of them), and the tables of the databases chosen, each with
+whether the login can read it (source_catalog.CAN_READ_SQL).
 
 Each database is one statement through the connection (remote_query). The tables of the databases chosen are read by
 the app's background reader (background_reads.py), which sends each statement with a wait so its answer comes back in
@@ -39,11 +40,17 @@ WANT_S = 10
 # A check waits this long for its answer when it is sent (the Statement Execution API takes 0, or 5 to 50 seconds):
 # most answer within it, so the step that sends them saves them too.
 CHECK_WAIT_S = 5
-# How a database is checked: opening it is the test, and the count says how many tables choosing it takes.
-ACCESS_SQL = "SELECT COUNT(*) AS tables FROM sys.tables WHERE is_ms_shipped = 0"
+# How a database is checked: opening it is the test, the count says how many tables choosing it takes, and readable
+# whether the login can read any of them. A login that may list every table (VIEW DEFINITION) but read none of them
+# would make a job that fails on each, so such a database is closed like one it can't open. EXISTS stops at the first
+# readable table, so a database the login reads costs one permission check, not one per table.
+ACCESS_SQL = ("SELECT COUNT(*) AS tables, CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.tables t "
+              "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+              f"WHERE t.is_ms_shipped = 0 AND {source_catalog.CAN_READ_SQL} = 1) THEN 1 ELSE 0 END AS INT) AS readable "
+              "FROM sys.tables WHERE is_ms_shipped = 0")
 TABLE_COLUMNS = ("discovery_id", "src_database", "src_schema", "src_table", "row_count", "size_mb", "ct_enabled",
                  "primary_key", "select_list", "excluded_columns", "rowversion_column", "identity_column", "load_type",
-                 "cursor_column", "partition_candidate", "notes")
+                 "cursor_column", "partition_candidate", "notes", "can_read")
 
 
 def _setting(name: str, default: int, low: int, high: int) -> int:
@@ -89,6 +96,22 @@ def server_key(connection: str) -> str:
 _NO_ACCESS = re.compile(r"Cannot open database|Login failed|not able to access the database|"
                         r"is not able to access|The server principal .* is not able to|permission was denied", re.I)
 _OFFLINE = re.compile(r"is not currently available|offline|being recovered|in the middle of a restore", re.I)
+
+
+# Why a database is closed when its check found tables but no table the login can read.
+NONE_READABLE = ("the connection's login can open this database but can't read any of its {tables} tables (it has no "
+                 "SELECT on them), so a job would fail on every one: ask the server's admin to grant it SELECT, for "
+                 "example db_datareader in this database")
+
+
+def none_readable(rows: Optional[List[dict]]) -> Optional[str]:
+    """Why a database whose check succeeded is still closed: it has tables and the login can read none of them; None
+    when it can read one, has no tables, or the answer has no readable column."""
+    row = (rows or [{}])[0]
+    tables, readable = count_of(rows), row.get("readable")
+    if not tables or readable is None or int(readable):
+        return None
+    return NONE_READABLE.format(tables=f"{tables:,}")
 
 
 def first_line(error: Optional[str]) -> str:
@@ -137,8 +160,10 @@ def finish(store, kind: str, discovery_id: str, database: str, statement_id: str
     """Save a statement that has ended: a check's answer, or a read's tables (or why it failed)."""
     ok = answer["state"] == "SUCCEEDED"
     if kind == CHECK:
-        store.finish_check(discovery_id, database, ok, count_of(answer["rows"]) if ok else None,
-                           None if ok else why_closed(answer.get("error")))
+        unreadable = none_readable(answer["rows"]) if ok else None
+        open_ = ok and unreadable is None
+        store.finish_check(discovery_id, database, open_, count_of(answer["rows"]) if ok else None,
+                           unreadable if ok else why_closed(answer.get("error")))
     elif ok:
         store.finish_read(discovery_id, database, table_rows(discovery_id, database, answer["rows"] or []), None,
                           statement_id)
