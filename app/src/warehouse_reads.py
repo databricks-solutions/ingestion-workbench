@@ -57,17 +57,15 @@ def _setting(name: str, default: int, low: int, high: int) -> int:
 # The cap on one server's checks and reads in flight together. On the lab a 100-eDTU pool's CPU capped 1,000-table
 # reads at about 0.65 databases a second, each read slower the more were in flight, and a 2X-Small warehouse began
 # queueing at 16, while throughput stayed flat from 3 to 11 at once: so one fixed number, 8, protects a shared server
-# and gives up little. The bundle variable reads_cap sets READS_CAP; a deploy that still sets READS_START_CAP is read
-# when READS_CAP is not set.
+# and gives up little. The bundle variable reads_cap sets READS_CAP.
 DEFAULT_CAP = 8
 MIN_CAP = 4
 MAX_CAP = 256
 
 
 def cap_from_environment() -> int:
-    """The cap set for this app: READS_CAP, or READS_START_CAP when that is not set, within MIN_CAP and MAX_CAP."""
-    name = "READS_CAP" if os.environ.get("READS_CAP") else "READS_START_CAP"
-    return _setting(name, DEFAULT_CAP, MIN_CAP, MAX_CAP)
+    """The cap set for this app: READS_CAP, within MIN_CAP and MAX_CAP."""
+    return _setting("READS_CAP", DEFAULT_CAP, MIN_CAP, MAX_CAP)
 
 
 CAP = cap_from_environment()

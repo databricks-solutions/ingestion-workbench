@@ -2,6 +2,13 @@
 
 *Formerly lakefed-ingest, and the EDW Ingestion Accelerator.*
 
+> **This version is being retired. It is removed from the repository on 15 January 2027.** Until then every
+> `databricks bundle` command of this bundle refuses unless you add `--var legacy_migrating=true`, so no new set-up
+> starts on it; jobs you already deployed keep running. After that date the last copy stays deployable from the tag
+> `job-orchestration-final`. To move your tables to the default version, see
+> [Moving off the job orchestration version](../docs/deploy.md#moving-off-the-job-orchestration-version). On
+> Windows, run the commands from Git Bash or WSL: the check is a bash script.
+
 > This is the **job orchestration** version of Ingestion Workbench: Jobs `for_each` tasks, SQL warehouse,
 > and a Delta control table. It is its own bundle (`lakefed_ingest`) — run every `databricks bundle`
 > command below from this `job_orchestration/` directory. The default version (Lakebase state,
@@ -177,7 +184,7 @@ deploy automation that ran from the root.
 
 ### Deploy to Development Environment
 ```bash
-$ databricks bundle deploy --target dev --profile DEFAULT
+$ databricks bundle deploy --target dev --profile DEFAULT --var legacy_migrating=true
 ```
 Note: Since "dev" is specified as the default target in databricks.yml, you can omit the `--target dev` parameter. Similarly, `--profile DEFAULT` can be omitted if you only have one profile configured for your workspace.
 
@@ -189,12 +196,12 @@ You can find the deployed job by opening your workspace and clicking on **Workfl
 
 ### Deploy to Production Environment
 ```bash
-$ databricks bundle deploy --target prod --profile PROD
+$ databricks bundle deploy --target prod --profile PROD --var legacy_migrating=true
 ```
 
 ### Run a Job
 ```bash
-$ databricks bundle run --target prod --profile PROD
+$ databricks bundle run --target prod --profile PROD --var legacy_migrating=true
 ```
 
 ## Development Tools
