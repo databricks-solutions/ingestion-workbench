@@ -1872,13 +1872,12 @@ def draft_discard_sql() -> str:
 
 
 def draft_drop_sql() -> str:
-    """Drop databases from an open draft (un-ticked): each one marked dropped, its claim and statement forgotten; the
-    statements going, to cancel. Never a whole-server read's database: that draft is discarded and started again when
-    its filter changes. Params: discovery_id, the names (text[]), discovery_id."""
+    """Drop databases from an open draft (un-ticked, a whole database or one under a ticked whole server): each one
+    marked dropped, its claim and statement forgotten; the statements going, to cancel. Params: discovery_id, the names
+    (text[]), discovery_id."""
     return (f"with old as (select src_database, listing ->> 'statement_id' as statement_id from {SCHEMA}.discovery "
             f"             where discovery_id = %s and src_database = any(%s::text[]) and listing ? 'draft' "
-            f"             and not listing ? 'discarded' and not listing ? 'dropped' "
-            f"             and not coalesce((listing ->> 'whole_server')::boolean, false) for update) "
+            f"             and not listing ? 'discarded' and not listing ? 'dropped' for update) "
             f"update {SCHEMA}.discovery d set listing = (d.listing - 'statement_id' - 'claimed_at') "
             f"|| jsonb_build_object('dropped', now()::text) from old "
             f"where d.discovery_id = %s and d.src_database = old.src_database "
@@ -1908,10 +1907,11 @@ def draft_reads_sql() -> str:
 
 
 def draft_failed_sql() -> str:
-    """The databases of a choice's discoveries that couldn't be read, with why and whether a whole-server read took
-    them (which leaves out one the login can't open, as the check would have); not one its draft dropped. Param:
-    discovery ids (text[])."""
-    return (f"select src_database, error, coalesce((listing ->> 'whole_server')::boolean, false) as whole_server "
+    """The databases of a choice's discoveries that couldn't be read (server and name), with why and whether a
+    whole-server read took them (which leaves out one the login can't open, as the check would have); not one its
+    draft dropped. Param: discovery ids (text[])."""
+    return (f"select lower(coalesce(src_connection, src_host)) as server, src_database, error, "
+            f"coalesce((listing ->> 'whole_server')::boolean, false) as whole_server "
             f"from {SCHEMA}.discovery where discovery_id = any(%s::text[]) and status = 'failed' and not ({DROPPED}) "
             f"order by src_database")
 
@@ -3429,7 +3429,10 @@ def selection_key(server: str, database: str, table: str = "") -> str:
     return "\x1f".join(str(part or "").lower() for part in ((server, database, table) if table else (server, database)))
 
 
-_SELECTED = ("(%s and position(lower(%s) in lower(r.src_database)) > 0) "
+# A selection's tables: the whole server's (its databases matching the filter, less the ones unticked under it), the
+# whole databases' and the tables named. Params: whole_server, filter, excluded database keys, database keys, table keys.
+_SELECTED = ("(%s and position(lower(%s) in lower(r.src_database)) > 0 "
+             "and lower(r.server) || chr(31) || lower(r.src_database) <> all(%s)) "
              "or lower(r.server) || chr(31) || lower(r.src_database) = any(%s) "
              "or lower(r.server) || chr(31) || lower(r.src_database) || chr(31) || lower(r.src_schema || '.' || r.src_table) "
              "= any(%s)")
@@ -3437,7 +3440,7 @@ _SELECTED = ("(%s and position(lower(%s) in lower(r.src_database)) > 0) "
 
 def selected_count_sql(kind: str) -> str:
     """How many tables a selection takes from a source. Params: the source's (see source_rows_sql), whole_server,
-    filter, database keys, table keys (selection_key)."""
+    filter, excluded database keys, database keys, table keys (selection_key)."""
     return f"select count(*) as n from ({source_rows_sql(kind)}) r where {_SELECTED}"
 
 
@@ -3445,8 +3448,9 @@ def selected_rows_page_sql(kind: str) -> str:
     """One page of the tables a selection takes, in the order a plan reads them (server, database, line, schema, table),
     after the key of the last row read. Keyset paging: each page starts where the last one ended, with no offset, so a
     selection is read in pages of any size. Each row carries its key's lower-case parts (k_database, k_schema, k_table)
-    for the next page. Params: the source's, whole_server, filter, database keys, table keys, after server, after
-    k_database, after line, after k_schema, after k_table, limit (the first page's after values: '', '', -1, '', '')."""
+    for the next page. Params: the source's, whole_server, filter, excluded database keys, database keys, table keys,
+    after server, after k_database, after line, after k_schema, after k_table, limit (the first page's after values:
+    '', '', -1, '', '')."""
     return (f"select r.server, r.src_database, r.src_schema, r.src_table, r.line, r.fields, "
             f"lower(r.src_database) as k_database, lower(r.src_schema) as k_schema, lower(r.src_table) as k_table "
             f"from ({source_rows_sql(kind)}) r where ({_SELECTED}) "
@@ -3499,7 +3503,8 @@ def database_rows_sql(kind: str) -> str:
 def selected_servers_sql(kind: str) -> str:
     """A selection's servers: each one's databases and tables it takes, and its tables by load type (load_unset: a line
     that leaves it to the job), in the order of the servers. One aggregate in Lakebase: only these few rows reach the
-    app. Params: the same as selected_rows_sql (the source's, whole_server, filter, database keys, table keys)."""
+    app. Params: the same as selected_count_sql (the source's, whole_server, filter, excluded database keys, database
+    keys, table keys)."""
     return (f"select r.server, count(distinct lower(r.src_database)) as databases, count(*) as tables, "
             f"count(*) filter (where r.load_type = 'ct') as load_ct, "
             f"count(*) filter (where r.load_type = 'cursor') as load_cursor, "

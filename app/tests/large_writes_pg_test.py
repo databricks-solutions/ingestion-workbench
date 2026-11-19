@@ -206,6 +206,66 @@ def test_a_large_selection_is_created_at_once_and_prepared_by_its_task(client):
     assert client.sql("select count(*) from lakefed_ingest.control") == [(800,)]
 
 
+def _databases(client) -> list:
+    return [(database, tables) for database, tables in client.sql(
+        "select src_database, count(*) from lakefed_ingest.control group by src_database order by src_database")]
+
+
+def test_the_whole_server_less_some_databases_creates_a_job_of_exactly_the_others(client):
+    """Discover's whole server with some databases unticked under it: the preview, Create and the job's kept selection
+    take every other database and none of those, matched in any case of the name; Add tables with the same choice adds
+    nothing of them either."""
+    up = client.post("/api/uploads", json={"csv": _csv(5, 4), "connection": "sql_a"}).json()["upload_id"]
+    source = {"upload_id": up, "whole_server": True,
+              "excluded_databases": [{"server": "SQL_A", "database": "ENG_001"}, {"server": "sql_a", "database": "eng_003"}]}
+    preview = client.post("/api/ingestion-jobs", json={"name": "Minus", "settings": SETTINGS, "source": source}).json()
+    assert preview["created"] is False and preview["summary"]["tables"] == 3 * 4
+    r = _create(client, "minus-1", name="Minus", source=source)
+    assert r.status_code == 200 and r.json()["created"] is True
+    job_id = r.json()["id"]
+    assert _databases(client) == [("eng_000", 4), ("eng_002", 4), ("eng_004", 4)]
+    kept = client.get(f"/api/ingestion-jobs/{job_id}/selection").json()
+    assert [(k["scope"], k["server"], k["src_database"], k["filter"]) for k in kept] == [
+        ("server", "sql_a", None, None), ("excluded_database", "SQL_A", "ENG_001", None),
+        ("excluded_database", "sql_a", "eng_003", None)]
+    stored = main._stored_selection(job_id, {"source": {"kind": "upload", "source_id": up}})
+    assert stored.whole_server and [d.database for d in stored.excluded_databases] == ["ENG_001", "eng_003"]
+    # Add tables with eng_003 ticked again under the server: only it is added; eng_001 stays out.
+    again = {**source, "excluded_databases": [{"server": "sql_a", "database": "eng_001"}]}
+    add = client.post(f"/api/ingestion-jobs/{job_id}/tables", json={"dry_run": False, "source": again})
+    assert add.status_code == 200 and add.json()["applied"] is True, add.text
+    assert _databases(client) == [("eng_000", 4), ("eng_002", 4), ("eng_003", 4), ("eng_004", 4)]
+
+
+def test_a_large_whole_server_less_a_database_is_prepared_without_it(client):
+    """More than BACKGROUND_ROWS tables: the job is recorded at once and its prepare task, which reads the selection
+    back from job_selection, writes every database but the one unticked."""
+    up = client.post("/api/uploads", json={"csv": _csv(10, 80), "connection": "sql_a"}).json()["upload_id"]
+    source = {"upload_id": up, "whole_server": True, "excluded_databases": [{"server": "sql_a", "database": "eng_004"}]}
+    r = _create(client, "minus-big", name="Minus big", source=source)
+    assert r.status_code == 200 and "task" not in r.json()
+    job_id = r.json()["id"]
+    prepare = client.get(f"/api/ingestion-jobs/{job_id}/prepare").json()
+    assert (prepare["state"], prepare["stage"]) == ("ready", None)
+    assert client.sql("select count(*), count(distinct src_database) from lakefed_ingest.control") == [(720, 9)]
+    assert client.sql("select count(*) from lakefed_ingest.control where src_database = 'eng_004'") == [(0,)]
+
+
+def test_a_discovery_whole_server_less_a_database_leaves_out_its_tables(client):
+    client.sql("insert into lakefed_ingest.discovery (discovery_id, src_type, src_database, status, src_connection) "
+               "values ('d1', 'sqlserver', 'eng_001', 'ok', 'SQL_A'), ('d1', 'sqlserver', 'eng_002', 'ok', 'SQL_A') "
+               "returning 1")
+    client.sql("insert into lakefed_ingest.discovered_table (discovery_id, src_database, src_schema, src_table, "
+               "select_list, primary_key, load_type, row_count) values "
+               "('d1', 'eng_001', 'gen', 't1', 'id', 'id', 'ct', 1), ('d1', 'eng_002', 'gen', 't1', 'id', 'id', 'ct', 1) "
+               "returning 1")
+    source = {"discovery_ids": ["d1"], "whole_server": True,
+              "excluded_databases": [{"server": "SQL_A", "database": "eng_002"}]}
+    r = _create(client, "minus-disc", name="Minus disc", source=source)
+    assert r.status_code == 200 and r.json()["summary"]["tables"] == 1
+    assert client.sql("select src_database from lakefed_ingest.control") == [("eng_001",)]
+
+
 def test_a_discovery_is_a_source_too(client):
     client.sql("insert into lakefed_ingest.discovery (discovery_id, src_type, src_database, status, src_connection) "
                "values ('d1', 'sqlserver', 'eng_001', 'ok', 'SQL_A'), ('d1', 'sqlserver', 'eng_002', 'ok', 'SQL_A'), "
@@ -237,7 +297,7 @@ def test_a_create_by_reference_spreads_its_databases_evenly_by_tables(client):
     sizes = [60, 50, 40, 40, 30, 30, 20, 20, 10, 10, 10, 10]
     text = HEAD + "".join(f"sql_a,eng_{d:03d},gen,t{t:04d},\"id, a\",id\n" for d, n in enumerate(sizes) for t in range(n))
     up = client.post("/api/uploads", json={"csv": text, "connection": "sql_a"}).json()["upload_id"]
-    counted = client.sql(q.selected_databases_sql("upload"), (up, True, "", [], []))
+    counted = client.sql(q.selected_databases_sql("upload"), (up, True, "", [], [], []))
     assert [(server, database, tables) for server, database, tables in counted] == [
         ("sql_a", f"eng_{d:03d}", n) for d, n in enumerate(sizes)]
     r = _create(client, "even-1", name="Even", source={"upload_id": up, "whole_server": True}, groups_per_server=3)

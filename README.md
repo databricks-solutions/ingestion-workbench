@@ -73,7 +73,8 @@ Upgrades are the same command: pull and deploy. The deploy migrates the Lakebase
 
 1. **Ingestion jobs > New ingestion job.** Under **What it ingests**, choose **Add tables**, then
    **Discover on a source**: pick the Unity Catalog connection, let it test, tick whole servers, databases or single
-   tables, and add them. Their tables and columns are read through the app's SQL warehouse while you go on with the
+   tables (tick the server, then untick the databases to leave out, for the whole server but a few), and add them.
+   Their tables and columns are read through the app's SQL warehouse while you go on with the
    rest of the page. **Import a CSV** is the other way in, for a list of tables you already have.
 2. **How it writes** and **When it runs.** Name the target catalog, schema and table pattern, and the cadence. The
    preview counts the tables and groups, and says how far the read is.

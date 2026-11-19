@@ -38,7 +38,7 @@ def test_new_job_keeps_the_read_going_and_says_how_far_it_is():
 def test_reading_tables_shows_only_after_add_while_the_reads_still_start_as_the_choice_is_made():
     # While choosing (step 2) the drafts' reads go on out of sight: no Reading tables line or bar in the dialog for them.
     assert "useDraftReads(connection, draftIds, draftGeneration);" in DISCOVER
-    assert "useEffect(() => { if (drafting) syncDrafts(); }, [drafting, wholeKey, wholeServer.on, wholeServer.filter]);" in DISCOVER
+    assert "useEffect(() => { if (drafting) syncDrafts(); }, [drafting, wholeKey, wholeServer.on, wholeServer.filter, excludedKey]);" in DISCOVER
     assert "draftProgress" not in DISCOVER and "step === 2 && drafting" not in DISCOVER
     # The dialog's only Busy line is its wait (the connection test, or the reading after Add on Edit's Add tables), and
     # New job shows the drafts' progress once Add has handed them over.

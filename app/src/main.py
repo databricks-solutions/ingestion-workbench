@@ -29,7 +29,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 import action_states
 import background_reads
@@ -841,14 +841,19 @@ class SelectedTables(SelectedDatabase):
 
 class Selection(BaseModel):
     """What to take from an upload or from discoveries: every database of the source matching the filter
-    (whole_server), whole databases, and some tables of others."""
+    (whole_server) except the ones unticked under it (excluded_databases), whole databases, and some tables of
+    others."""
     upload_id: Optional[str] = None
     discovery_id: Optional[str] = None
     discovery_ids: List[str] = []
     whole_server: bool = False
     filter: str = ""
+    excluded_databases: List[SelectedDatabase] = []
     databases: List[SelectedDatabase] = []
     tables: List[SelectedTables] = []
+    # The keys (selection_key) of the databases unticked under the whole server and of those named, made once.
+    _excluded: frozenset = PrivateAttr(default=frozenset())
+    _named: frozenset = PrivateAttr(default=frozenset())
 
     @model_validator(mode="after")
     def _one_source(self):
@@ -856,6 +861,10 @@ class Selection(BaseModel):
             raise ValueError("name an upload_id or a discovery_id, not both")
         if not (self.whole_server or self.databases or self.tables or self.upload_id):
             raise ValueError("choose the whole server, databases or tables")
+        self._excluded = frozenset(q.selection_key(d.server, d.database) for d in self.excluded_databases
+                                   if self.whole_server)
+        self._named = frozenset([q.selection_key(d.server, d.database) for d in self.databases]
+                                + [q.selection_key(t.server, t.database) for t in self.tables])
         return self
 
     def source(self):
@@ -864,6 +873,21 @@ class Selection(BaseModel):
             return "upload", self.upload_id, self.upload_id
         ids = list(dict.fromkeys(([self.discovery_id] if self.discovery_id else []) + self.discovery_ids))
         return "discovery", ids, ",".join(ids)
+
+    def excluded_keys(self) -> List[str]:
+        """The databases the whole server leaves out, as the selection queries match them (selection_key)."""
+        return sorted(self._excluded)
+
+    def leaves_out(self, server: str, database: str) -> bool:
+        """Whether this database was unticked under the whole server and isn't named on its own either (whole, or for
+        some of its tables), so nothing of it is the choice's: a read of it that failed is no failure of the choice."""
+        key = q.selection_key(server, database)
+        return key in self._excluded and key not in self._named
+
+    def server_covers(self, server: str, database: str) -> bool:
+        """Whether the whole server takes this database: its name contains the filter and it wasn't unticked."""
+        return (self.whole_server and self.filter.lower() in database.lower()
+                and q.selection_key(server, database) not in self._excluded)
 
 
 def _selection_params(selection: Selection) -> tuple:
@@ -874,16 +898,22 @@ def _selection_params(selection: Selection) -> tuple:
         raise HTTPException(404, f"upload {param} not found")
     database_keys = [q.selection_key(d.server, d.database) for d in selection.databases]
     table_keys = [q.selection_key(t.server, t.database, name) for t in selection.tables for name in t.tables]
-    return kind, param, source_id, (selection.whole_server, selection.filter, database_keys, table_keys)
+    return kind, param, source_id, (selection.whole_server, selection.filter, selection.excluded_keys(), database_keys,
+                                    table_keys)
 
 
 def _selection_parts(selection: Selection, whole_servers: List[str]) -> list:
-    """What a selection was made from, part by part (job_selection): the whole servers (with the filter), the whole
-    databases and the tables it names, leaving out those a whole server covers."""
-    covered = lambda database: bool(selection.whole_server) and selection.filter.lower() in database.lower()
+    """What a selection was made from, part by part (job_selection): the whole servers (with the filter) and the
+    databases unticked under each, the whole databases and the tables it names, leaving out those a whole server
+    covers."""
+    whole = {server.lower() for server in whole_servers}
     return ([("server", server, None, None, selection.filter or None) for server in whole_servers]
-            + [("database", d.server, d.database, None, None) for d in selection.databases if not covered(d.database)]
-            + [("tables", t.server, t.database, list(t.tables), None) for t in selection.tables if not covered(t.database)])
+            + [("excluded_database", d.server, d.database, None, None) for d in selection.excluded_databases
+               if selection.whole_server and d.server.lower() in whole]
+            + [("database", d.server, d.database, None, None) for d in selection.databases
+               if not selection.server_covers(d.server, d.database)]
+            + [("tables", t.server, t.database, list(t.tables), None) for t in selection.tables
+               if not selection.server_covers(t.server, t.database)])
 
 
 SELECTED_PAGE = 1000   # the tables a selection is read from Lakebase by, one keyset page at a time
@@ -898,8 +928,9 @@ def _selected_rows(kind: str, param, selection: Selection, whole_databases: Iter
     table_keys = [q.selection_key(t.server, t.database, name) for t in selection.tables for name in t.tables]
     rows, after = [], ("", "", -1, "", "")
     while True:
-        page = db.query(q.selected_rows_page_sql(kind), (param, selection.whole_server, selection.filter, database_keys,
-                                                         table_keys, *after, SELECTED_PAGE))
+        page = db.query(q.selected_rows_page_sql(kind), (param, selection.whole_server, selection.filter,
+                                                         selection.excluded_keys(), database_keys, table_keys, *after,
+                                                         SELECTED_PAGE))
         if len(rows) + len(page) > BACKGROUND_ROWS:
             raise HTTPException(422, {"errors": [f"the selection grew past {BACKGROUND_ROWS:,} tables while it was "
                                                  "read: send it again, and it is written in the background"]})
@@ -946,15 +977,9 @@ def _selected(selection: Selection) -> dict:
         raise HTTPException(422, {"errors": [_no_tables_refusal(kind, param, selection)]})
     whole = ([s["server"] for s in db.query(q.source_servers_sql(kind), (param, selection.filter))]
              if selection.whole_server else [])
-    covered = lambda server, database: (server.lower() in {w.lower() for w in whole}
-                                        and selection.filter.lower() in database.lower())
-    parts = ([("server", server, None, None, selection.filter or None) for server in whole]
-             + [("database", d.server, d.database, None, None) for d in selection.databases if not covered(d.server, d.database)]
-             + [("tables", t.server, t.database, list(t.tables), None) for t in selection.tables
-                if not covered(t.server, t.database)])
     return {"text": nj.csv_of(columns, [r["fields"] for r in rows]), "rows": rows, "columns": columns,
             "lines": [r["line"] if kind == "upload" else None for r in rows], "database_lines": database_lines,
-            "parts": parts, "kind": kind, "source_id": source_id}
+            "parts": _selection_parts(selection, whole), "kind": kind, "source_id": source_id}
 
 
 def _file_lines(plan: dict, selected: Optional[dict]) -> dict:
@@ -4079,8 +4104,8 @@ def drop_from_draft(discovery_id: str, body: DropRequest, request: Request):
     DELETE), its statement still going is cancelled, and it is left out of the read's progress, Create's wait and the
     databases that couldn't be read. One read already is kept, so ticking it again, which grows the draft by it again
     (warehouse_named_rows_sql), costs nothing. Only while the draft is open, and only by the person who started it.
-    A whole-server read's databases are never dropped: that draft is discarded and started again when its filter
-    changes."""
+    A whole-server read drops the databases unticked under the server the same way (its draft is discarded and
+    started again only when its filter changes)."""
     names = list(dict.fromkeys(d.strip() for d in body.databases if d.strip()))
     drafts = db.query(q.draft_of_sql(), (discovery_id,))
     if not drafts:
@@ -4128,7 +4153,7 @@ def _draft_reading(selection: "Selection", advance: bool = True) -> Optional[dic
         return None
     rows = db.query(q.draft_failed_sql(), (ids,)) if total["failed"] else []
     left_out = [r for r in rows if r["whole_server"] and warehouse_reads.no_access(r.get("error"))]
-    failed = [r for r in rows if r not in left_out]
+    failed = [r for r in rows if r not in left_out and not selection.leaves_out(r["server"], r["src_database"])]
     return {**total, "failed": len(failed), "left_out": len(left_out),
             "failed_databases": [[r["src_database"], warehouse_reads.first_line(r.get("error"))] for r in failed[:50]]}
 
@@ -5555,6 +5580,8 @@ def _stored_selection(sid: int, record: dict, cur=None) -> Optional[Selection]:
         return None
     whole = [p for p in parts if p["scope"] == "server"]
     chosen = {"whole_server": bool(whole), "filter": (whole[0].get("filter") or "") if whole else "",
+              "excluded_databases": [SelectedDatabase(server=p["server"], database=p["src_database"])
+                                     for p in parts if p["scope"] == "excluded_database"],
               "databases": [SelectedDatabase(server=p["server"], database=p["src_database"])
                             for p in parts if p["scope"] == "database"],
               "tables": [SelectedTables(server=p["server"], database=p["src_database"], tables=list(p["tables"] or []))
@@ -5691,7 +5718,8 @@ def _left_out_entries(job_id: int, record: dict, body: SetAsideRequest, cur) -> 
         return entries
     job = _load_schedule(job_id, cur)[0]
     ids = _job_discovery_ids(job)
-    failed = [e for e in (_failed_reads(job) if ids else []) if e["kind"] == preparing.UNREADABLE
+    chosen_from = _stored_selection(job_id, record, cur) if ids else None
+    failed = [e for e in (_failed_reads(job, chosen_from) if ids else []) if e["kind"] == preparing.UNREADABLE
               and (keys is None or preparing.database_key(e["server"], e["database"]) in keys)]
     if failed:
         db.fetch(cur, q.prepare_leave_out_reads_sql(), (ids, str(int(job_id)), False,
@@ -5910,9 +5938,8 @@ def _discovery_key_row(row: dict) -> dict:
 def _chosen_databases(selection: Selection, kind: str, param) -> List[dict]:
     """The databases a choice takes, one row each ({server, src_database} and the fields its database key reads), from
     what is known before any table is read: a discovery's rows (not one its draft dropped), or an upload's lines."""
-    whole, keys = selection.whole_server, {q.selection_key(d.server, d.database) for d in selection.databases}
+    keys = {q.selection_key(d.server, d.database) for d in selection.databases}
     keys |= {q.selection_key(t.server, t.database) for t in selection.tables}
-    filter_ = (selection.filter or "").lower()
     if kind == "discovery":
         rows = [{**_discovery_key_row(r), "server": r["server"]} for r in db.query(q.selection_discoveries_sql(), (param,))
                 if not (r.get("listing") or {}).get("dropped") and r.get("src_database")]
@@ -5924,7 +5951,7 @@ def _chosen_databases(selection: Selection, kind: str, param) -> List[dict]:
     chosen, seen = [], set()
     for row in rows:
         key = q.selection_key(row["server"], row["src_database"])
-        if key in seen or not ((whole and filter_ in row["src_database"].lower()) or key in keys):
+        if key in seen or not (selection.server_covers(row["server"], row["src_database"]) or key in keys):
             continue
         seen.add(key)
         chosen.append(row)
@@ -6200,14 +6227,16 @@ def _prepare_reads(sid: int, held: threading.Event, job: dict) -> None:
         time.sleep(PREPARE_POLL_S)
 
 
-def _failed_reads(job: dict) -> List[dict]:
+def _failed_reads(job: dict, selection: Optional[Selection]) -> List[dict]:
     """Every database of the job's claimed drafts that couldn't be read (job_failed_reads_sql), each as a set-aside
     entry: one a whole-server read couldn't open is closed (left out, as the whole-server read always has), any other
-    couldn't be read."""
+    couldn't be read. One unticked under the whole server (selection, what the job was chosen from) isn't the job's,
+    so it is none of these."""
     ids = _job_discovery_ids(job)
     if not ids:
         return []
-    rows = db.query(q.job_failed_reads_sql(), (ids, str(int(job["id"])), 1_000_000, 0))
+    rows = [r for r in db.query(q.job_failed_reads_sql(), (ids, str(int(job["id"])), 1_000_000, 0))
+            if selection is None or not selection.leaves_out(r["server"], r["src_database"])]
     return [preparing.entry(r["server"], r["src_database"],
                             preparing.CLOSED if r["whole_server"] and warehouse_reads.no_access(r.get("error"))
                             else preparing.UNREADABLE, warehouse_reads.first_line(r.get("error")) or "it couldn't be read")
@@ -6234,7 +6263,7 @@ def _prepare_databases(sid: int, held: threading.Event, job: dict, source: Prepa
     of the whole choice, as Create placed them before. A database whose plan has a line that can't be taken is set
     aside whole, with why. A plan that fails as a whole (the job's settings) stops the preparation."""
     selection = source.selection
-    unreadable = _failed_reads(job) if kind == "discovery" else []
+    unreadable = _failed_reads(job, selection) if kind == "discovery" else []
     counts = {k: sum(1 for e in unreadable if e["kind"] == k) for k in preparing.KINDS}
     record = preparing.record_of(sch.options_of(job)) or {}
     skip = {_unit_key(e["server"], e["database"]) for e in unreadable}

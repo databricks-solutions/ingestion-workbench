@@ -219,6 +219,19 @@ def test_a_run_adds_what_the_rules_allow_through_the_add_tables_path_as_re_disco
     assert syncs == []
 
 
+def test_a_run_never_adds_a_database_unticked_under_the_whole_server(monkeypatch):
+    fake, records, syncs = FakeDB(), [], []
+    unticked = {"scope": "excluded_database", "server": "h1", "src_database": "eng_002", "tables": None, "filter": None,
+                "source_kind": "discovery", "source_id": "d1"}
+    _fake_run(monkeypatch, fake, records, syncs, selection=[unticked],
+              found=[found_row("eng_001", "t1"), found_row("eng_002", "t1"), found_row("eng_003", "t1")])
+    main._run_rediscovery(7, NOW)
+    record = json.loads(records[-1][1][0])
+    assert record["status"] == "done" and record["new_databases"] == ["h1/eng_003"] and record["added"] == 1
+    inserted = fake.of("insert into lakefed_ingest.control (")
+    assert [row[q.CONTROL_INSERT_COLUMNS.index("src_database")] for row in inserted] == ["eng_003"]
+
+
 def test_a_database_found_is_placed_against_the_jobs_own_tables_per_group(monkeypatch):
     """A job of 100 tables per group finds a 250-table database: it is spread over the job's three groups, which the
     default size of 10,000 would have kept whole in one."""
@@ -374,11 +387,12 @@ def _tick_rows(sql: str, claims: list):
 
 
 def _fake_run(monkeypatch, fake: FakeDB, records: list, syncs: list, options=None, job_rows=None, found=None,
-              listing: Optional[dict] = None, run_result: Optional[dict] = None) -> None:
+              listing: Optional[dict] = None, run_result: Optional[dict] = None, selection=None) -> None:
     """The whole run with the database faked: the job has eng_001.t1 under a whole server (filter 'eng'), and the
     discovery finds eng_002 as new. The discover job's run is started and reads as succeeded, unless run_result says
     how it ended. A test can give the job's options, the rows it holds (job_rows), what the discovery finds (found,
-    which then lists every database) and the listing the server's discovery recorded (listing)."""
+    which then lists every database), the listing the server's discovery recorded (listing) and the job's
+    selection parts after its whole server (selection)."""
     job = {"id": 7, "name": "lakefed job", "cadence_minutes": 1440, "stagger": False, "options": options or {},
            "paused": False,
            "job_variant": "default", "timezone": "UTC", "created_at": None, "deleted_at": None,
@@ -388,7 +402,7 @@ def _fake_run(monkeypatch, fake: FakeDB, records: list, syncs: list, options=Non
     members = [{"id": 1, "schedule_id": 7, "task_collection": "g1", "offset_minutes": 0, "job_id": 99,
                 "synced_at": None, "sync_error": None, "added_at": None, "removed_at": None, "delete_pending": False}]
     selection = [{"scope": "server", "server": "h1", "src_database": None, "tables": None, "filter": "eng",
-                  "source_kind": "discovery", "source_id": "d1"}]
+                  "source_kind": "discovery", "source_id": "d1"}] + list(selection or [])
     sources = [host_source(listing=listing or {"pattern": "eng%", "secret_key_template": "creds-{database}"})]
     job_rows = job_rows or [job_row("eng_001", "t1")]
     found = found or [found_row("eng_001", "t1"), found_row("eng_002", "t1")]
