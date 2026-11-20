@@ -1464,8 +1464,16 @@ def validate_control_row(row: dict) -> List[str]:
         errs.append(f"load_type {lt} is only supported for src_type sqlserver")
     if "*" in str(row.get("select_list") or ""):
         errs.append("select_list must list explicit columns (* isn't supported)")
-    if row.get("load_partitioned") and (not row.get("partition_col") or not row.get("partition_size_mb")):
+    if row.get("load_partitioned") and (not row.get("partition_col") or row.get("partition_size_mb") in (None, "")):
         errs.append("partitioned loads need partition_col and partition_size_mb")
+    elif row.get("load_partitioned"):
+        try:
+            size_ok = MIN_PARTITION_SIZE_MB <= int(row["partition_size_mb"]) <= MAX_PARTITION_SIZE_MB
+        except (TypeError, ValueError):
+            size_ok = False
+        if not size_ok:
+            errs.append(f"partition_size_mb must be a whole number from {MIN_PARTITION_SIZE_MB} to "
+                        f"{MAX_PARTITION_SIZE_MB:,} (MB)")
     sla = row.get("freshness_sla_minutes")
     if sla not in (None, ""):
         try:
@@ -1522,8 +1530,15 @@ def control_params(row: dict) -> tuple:
 
 # ---- bulk import (table discovery) --------------------------------------------------------------
 
-DEFAULT_PARTITION_THRESHOLD_MB = 1024   # tables at least this large get a partitioned seed / full load
-DEFAULT_PARTITION_SIZE_MB = 512
+# Tables at least this large (SQL Server's allocated size) get a partitioned seed / full load, in partitions of about
+# DEFAULT_PARTITION_SIZE_MB. A run already loads many tables at once, and each partitioned table costs a size and a
+# bounds query, a staging table and a swap, and adds parallel queries on its source, so partitioning pays only for the
+# tables whose single read outlasts the rest of a run: about 10 GB and up at the rates measured (a few MB/s per read).
+DEFAULT_PARTITION_THRESHOLD_MB = 10240
+DEFAULT_PARTITION_SIZE_MB = 2048
+# A partition size the row check takes: at most 10 GB (a larger partition is one long read again), so a mistyped size
+# is refused instead of overflowing the control column's int and failing the whole write.
+MIN_PARTITION_SIZE_MB, MAX_PARTITION_SIZE_MB = 1, 10240
 
 
 def discoveries_sql() -> str:
@@ -3368,7 +3383,8 @@ def upload_head_sql() -> str:
 def source_rows_sql(kind: str) -> str:
     """The tables of an upload (its ok lines; param upload_id) or of discoveries (param: list of discovery ids; a
     table found by more than one, its latest finding), each with its server, database, schema, table, load type, and
-    what the CSV a plan reads takes from it: for an upload its line and fields, for a discovery its settings. The
+    what the CSV a plan reads takes from it: for an upload its line and fields, for a discovery its settings, with its
+    size and partition candidate for new_job to decide its partitioning (recommended_partitioning). The
     subquery the views and the selection read from."""
     if kind == "upload":
         return (f"select server, src_database, src_schema, src_table, load_type, null::text as cursor_column, "
@@ -3384,7 +3400,7 @@ def source_rows_sql(kind: str) -> str:
             f"'secret_key', case when d.src_connection is null then d.secret_key end, "
             f"'src_database', t.src_database, 'src_schema', t.src_schema, 'src_table', t.src_table, "
             f"'select_list', t.select_list, 'primary_key', t.primary_key, 'cursor_column', t.cursor_column, "
-            f"'load_type', t.load_type) as fields "
+            f"'load_type', t.load_type, 'size_mb', t.size_mb, 'partition_candidate', t.partition_candidate) as fields "
             f"from {SCHEMA}.discovered_table t join {SCHEMA}.discovery d "
             f"on d.discovery_id = t.discovery_id and d.src_database = t.src_database "
             f"where t.discovery_id = any(%s) "
