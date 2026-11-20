@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { SOURCE_TYPE_NAMES } from "../cells";
-import { PageHead, ErrorBox, Section, ToastOn, WriteWarnings } from "../components";
+import { FullAppendNote, PageHead, ErrorBox, Section, ToastOn, WriteWarnings } from "../components";
 import { groupsRefusal, usePermissions } from "../permissions";
 
 // The values in words, as the Edit view names them.
@@ -31,7 +31,7 @@ const FIELDS: Field[] = [
   { key: "sink_table", label: "Target table", required: true },
   { key: "client_id", label: "Client ID", help: "set to share one sink across databases" },
   { key: "write_mode", label: "Write mode", options: ["merge", "append"], initial: "merge",
-    help: "append: the sink is a change log (ct and full)" },
+    help: "merge: the current rows (a full load replaces them); append: a change log (a full load adds a whole copy every run)" },
   { key: "client_attrs", label: "Identity columns", help: 'JSON object, e.g. {"tenant_name": "Acme"}' },
   { key: "cursor_column", label: "Cursor column", help: "cursor only (rowversion recommended)" },
   { key: "load_partitioned", label: "Partitioned first load", type: "checkbox", initial: false },
@@ -78,6 +78,7 @@ export default function AddTable() {
               {f.help && <span className="muted small">{f.help}</span>}
             </label>
           ); })}
+          <FullAppendNote loadType={row.load_type} writeMode={row.write_mode} className="impact wide" />
           {locked && <p className="wide muted small">{locked}.</p>}
           <div className="wide"><button className="primary" disabled={add.isPending || !!locked}>Add table</button></div>
         </form>

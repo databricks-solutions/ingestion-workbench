@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode } from "react";
 import type { Row } from "../api";
-import { Info, Required, fmtInt, plural } from "../components";
+import { FullAppendNote, Info, Required, fmtInt, plural } from "../components";
 
 // The sections New ingestion job and Edit share, so a job is set up and changed in one editor: how it writes, its
 // identity columns, when it runs and the advanced configuration. Each takes the form's values and setters; Edit adds
@@ -43,6 +43,7 @@ export function WritesFields({ w, setW, stored, modeNote, targetsNote, reseed }:
         <label><span>Target table<Required /><Info label="About target names">{TAGS_HELP}</Info></span><input value={w.sink_table ?? ""} onChange={(e) => setW({ ...w, sink_table: e.target.value })} /><Mixed s={stored?.sink_table} /></label>
         {reseed}
       </div>
+      <FullAppendNote loadType="full" writeMode={w.write_mode_full} many />
       {modeNote}
       {targetsNote}
     </>

@@ -188,6 +188,23 @@ def failure_message(run_id, task_collection: str, failed: List[tuple], link: str
     return "\n".join(lines)
 
 
+FULL_APPEND_TABLES_NAMED = 3
+
+
+def full_append_warning(configs: List[dict]) -> Optional[str]:
+    """The run's warning when some of its tables are full reloads in append mode, or None. Such a table appends a
+    whole copy of itself every run (a snapshot, by design: see docs/how-it-works.md, "Append sinks"), so its target
+    grows by the table's size each run; merge mode replaces the rows instead. Often the pair is set by mistake."""
+    tables = [f"{c['src_database']}.{c['src_schema']}.{c['src_table']}" for c in configs
+              if c.get("load_type") == "full" and c.get("write_mode") == "append"]
+    if not tables:
+        return None
+    named = ", ".join(tables[:FULL_APPEND_TABLES_NAMED])
+    more = f" and {len(tables) - FULL_APPEND_TABLES_NAMED} more" if len(tables) > FULL_APPEND_TABLES_NAMED else ""
+    return (f"[warn] {len(tables)} full-reload table(s) in append mode add a whole copy every run, so their targets "
+            f"grow by the table's size each run: {named}{more}. Set write_mode to merge to replace the rows instead.")
+
+
 def sink_checked_configs(configs: List[dict]) -> List[dict]:
     """The rows whose sink table must exist for them to continue (``route_tables`` reseeds a missing
     one): the incremental strategies, ct and cursor. The sweep and the check list the sinks of these."""

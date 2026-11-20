@@ -175,6 +175,19 @@ def test_plan_edit_reseed_reasons_and_notes():
     assert p["reseed"] is None and p["changes"]          # full reloads every run: no reseed needed
 
 
+def test_plan_edit_says_a_full_reload_in_append_mode_adds_a_copy_every_run():
+    full = dict(ROW, load_type="full", primary_key=None, write_mode="merge")
+    (p,) = q.plan_edit([full], {"write_mode": "append", "sink_table": "t_log"}, bulk=False)
+    assert p["errors"] == [] and q.FULL_APPEND_NOTE in p["notes"]
+    (p,) = q.plan_edit([dict(ROW, write_mode="append")], {"load_type": "full", "primary_key": None}, bulk=False)
+    assert q.FULL_APPEND_NOTE in p["notes"]
+    # An edit that leaves the pair as it was (here a freshness target) doesn't repeat it; the engine warns each run.
+    (p,) = q.plan_edit([dict(full, write_mode="append")], {"freshness_sla_minutes": 60}, bulk=False)
+    assert q.FULL_APPEND_NOTE not in p["notes"]
+    (p,) = q.plan_edit([full], {"sink_table": "t2"}, bulk=False)
+    assert q.FULL_APPEND_NOTE not in p["notes"]
+
+
 def test_plan_edit_ignores_cosmetic_changes():
     for change in ({"src_host": "SRV"}, {"src_port": 1433}, {"primary_key": " ID "}, {"sink_table": "T"}, {"tier": ""}):
         (p,) = q.plan_edit([ROW], change, bulk=False)

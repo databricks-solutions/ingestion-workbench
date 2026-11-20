@@ -15,7 +15,7 @@ export const EDIT_FIELDS: { key: string; label?: string; type?: "number" | "chec
   { key: "src_port", type: "number" }, { key: "secret_key" }, { key: "src_database" }, { key: "src_schema" }, { key: "src_table" },
   { key: "select_list" }, { key: "primary_key" }, { key: "load_type", type: "select", options: ["ct", "cursor", "full"] },
   { key: "cursor_column" }, { key: "sink_catalog" }, { key: "sink_schema" }, { key: "sink_table" }, { key: "client_id" },
-  { key: "write_mode", type: "select", options: ["merge", "append"], help: "changing it needs a new sink" },
+  { key: "write_mode", type: "select", options: ["merge", "append"], help: "merge: the current rows (a full load replaces them); append: a change log (a full load adds a whole copy every run). Changing it needs a new sink" },
   { key: "client_attrs", help: "JSON object {column: value}" },
   { key: "load_partitioned", type: "checkbox" }, { key: "partition_col" }, { key: "partition_size_mb", type: "number" },
   { key: "jdbc_options", help: "JSON object" },
