@@ -357,6 +357,9 @@ export default function JobEdit() {
   // The cluster copies run a save started: from the save's answer until a read taken after it shows the run ended.
   const [applyStartedAt, setApplyStartedAt] = useState<number | null>(null);
   const [applyError, setApplyError] = useState<string | null>(null);
+  // Kept apart from the mutation's result: a failed second step (the schedule) fails the mutation, but the settings it
+  // saved first stand, and so does their warning.
+  const [settingsWarnings, setSettingsWarnings] = useState<Row[]>([]);
   const clusterInfo = useQuery({
     queryKey: ["job-cluster", id], queryFn: () => api.get<Row>(`/ingestion-jobs/${id}/cluster`),
     refetchInterval: (query) => (query.state.data?.applying || applyStartedAt != null ? 5000 : false),
@@ -404,6 +407,7 @@ export default function JobEdit() {
   const save = useMutation({
     mutationFn: async () => {
       setApplyError(null);
+      setSettingsWarnings([]);
       // A cluster read already in flight would answer from before this save, so it can't end the wait.
       await qc.cancelQueries({ queryKey: ["job-cluster", id] });
       const edits = changed();
@@ -413,6 +417,7 @@ export default function JobEdit() {
         // The preview refuses (422, with its reasons) anything the tables can't take, before any write.
         await api.post<Row>(`/ingestion-jobs/${id}/settings`, { settings: edits, dry_run: true });
         result = await api.post<Row>(`/ingestion-jobs/${id}/settings`, { settings: edits, dry_run: false });
+        setSettingsWarnings(result?.warnings ?? []);
       }
       if (schedule) {
         const cadence = Number(run.cadence_minutes);
@@ -522,6 +527,7 @@ export default function JobEdit() {
         are {AVAILABLE_WHEN_READY}.</Notice>}
       <ErrorBox error={settings.error || (isUnconfirmed(save.error) ? null : save.error)} />
       <StatusLine line={saveLine} />
+      <WriteWarnings warnings={settingsWarnings} />
 
       {schedule && <Section title="Name">
         <div className="form-grid"><label><span>Job name<Required /></span><input value={name} onChange={(e) => setName(e.target.value)} /></label></div>

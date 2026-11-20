@@ -77,6 +77,10 @@ class FakeCursor:
         elif sql == q.mixed_sinks_for_sql():
             sinks = [f"{c}.{sc}.{t}" for c, sc, t in zip(*params)]
             self._rows = [(s,) for s in sinks if s in self.db.mixed]
+        elif sql == q.mixed_load_sinks_sql():
+            mixed = self.db.mixed_load if self.db.wrote else self.db.mixed_load_before
+            sinks = [f"{c}.{sc}.{t}" for c, sc, t in zip(*params[:3])]
+            self._rows = [(s, 1, 1, 0) for s in sinks if s in mixed]
         elif sql == q.split_databases_sql():
             split = self.db.split if self.db.wrote else self.db.split_before
             self._rows = [(k, k.split("\x1f")[1], ["c1", "c2"]) for k in params[0] if k in split]
@@ -116,6 +120,8 @@ class FakeDB:
         self.mixed = set()          # sinks the mixed-sink check reports
         self.split = set()          # databases (q.database_key) the one-collection check reports split once rows are written
         self.split_before = set()   # the ones it reports before that, so already split when the write starts
+        self.mixed_load = set()         # sinks the mixed-load check reports once rows are written
+        self.mixed_load_before = set()  # the ones it reports before that, so mixed already when the write starts
         self.wrote = False
 
     def of(self, prefix):
@@ -528,6 +534,46 @@ def test_registering_tables_into_another_collection_than_their_database_is_writt
     r = client.post("/api/discoveries/d1/register", json=body)
     assert r.status_code == 200 and "db1" in r.json()["warnings"][0]["message"]
 
+
+
+# ---- a shared target whose tables load in different ways is written, with a warning ----------------------
+
+def test_adding_a_full_reload_table_to_a_shared_target_of_change_tracked_tables_is_written_with_a_warning(client):
+    client.db.mixed_load = {"main.bronze.orders"}
+    r = client.post("/api/tables", json=dict(ROW, load_type="full"))
+    assert r.status_code == 200 and r.json()["id"]
+    [warning] = r.json()["warnings"]
+    assert warning["kind"] == "mixed_load" and warning["targets"][0]["target"] == "main.bronze.orders"
+    assert "different load types" in warning["message"]
+
+
+def test_a_write_to_a_target_that_was_mixed_before_it_is_no_warning(client):
+    client.db.mixed_load = client.db.mixed_load_before = {"main.bronze.orders"}
+    r = client.post("/api/tables", json=dict(ROW, load_type="full"))
+    assert r.status_code == 200 and r.json()["warnings"] == []
+
+
+def test_a_write_that_mixes_no_target_is_no_warning(client):
+    r = client.post("/api/tables", json=dict(ROW, load_type="full"))
+    assert r.status_code == 200 and r.json()["warnings"] == []
+
+
+def test_the_mix_is_looked_for_before_the_first_row_is_written_and_only_for_shared_targets(client):
+    client.post("/api/tables", json=ROW)
+    statements = [sql for sql, _ in client.db.statements]
+    assert statements.index(q.mixed_load_sinks_sql()) < statements.index(q.insert_control_sql())
+    assert len(client.db.of(q.mixed_load_sinks_sql())) == 2          # before and after the write
+    client.db.statements.clear()
+    assert client.post("/api/tables", json=dict(ROW, client_id=None)).status_code == 200
+    assert client.db.of(q.mixed_load_sinks_sql()) == []
+
+
+def test_registering_tables_onto_a_target_that_becomes_mixed_is_written_with_a_warning(client):
+    client.db.mixed_load = {"main.bronze.orders"}
+    body = {"task_collection": "c1", "shared": {"sink_schema": "bronze", "sink_table": "orders", "client_id": "db1"}}
+    r = client.post("/api/discoveries/d1/register", json=body)
+    assert r.status_code == 200
+    assert [w["kind"] for w in r.json()["warnings"]] == ["mixed_load"]
 
 
 def test_a_databricks_run_link_opens_its_run_page(monkeypatch):

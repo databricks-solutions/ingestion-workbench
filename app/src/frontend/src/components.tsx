@@ -646,8 +646,10 @@ export function ErrorBox({ error }: { error: unknown }) {
 
 /** What a write that went through wants the user to know (its answer's warnings), as the Databricks UI shows a warning
  *  that blocks nothing: a yellow alert where the action was taken, saying what was done and what it costs, with a link
- *  to each job it names. A database a write splits over several ingestion groups is the one warning so far (main.py
- *  _split_database_warnings); a later write to a database split already has none. */
+ *  to each job it names. Two warnings so far: a database a write splits over several ingestion groups
+ *  (main.py _split_database_warnings), and a shared target whose tables a write makes load in different ways
+ *  (main.py _mixed_load_warnings, and the same text in New ingestion job's preview, before anything is written). A later
+ *  write to a database or target already in that state has none. */
 export function WriteWarnings({ warnings }: { warnings?: Row[] | null }) {
   if (!warnings?.length) return null;
   return (

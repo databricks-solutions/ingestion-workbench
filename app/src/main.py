@@ -22,7 +22,7 @@ import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Collection, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Collection, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -43,6 +43,7 @@ import jobs
 import by_database
 import jdbc_logins as jl
 import lakebase as db
+import mixed_load
 import new_job as nj
 import placement
 import preparing
@@ -206,13 +207,20 @@ def _lock_collections_together(cur, collections):
             raise _running_refusal(c)
 
 
+def _sink_lists(rows) -> Optional[tuple]:
+    """The sinks of some control rows as the three lists (catalogs, schemas, tables; lower case, one entry per sink)
+    the sink checks take, or None when there are no rows."""
+    sinks = sorted({tuple(str(r.get(k)).lower() for k in ("sink_catalog", "sink_schema", "sink_table")) for r in rows})
+    return tuple([sink[at] for sink in sinks] for at in range(3)) if sinks else None
+
+
 def _refuse_mixed_sinks(cur, rows):
     """After writing control rows, in the same transaction: refuse when a sink they write would be
     claimed by a dedicated row and by other rows (the next run would stop every table on it)."""
-    sinks = sorted({tuple(str(r.get(k)).lower() for k in ("sink_catalog", "sink_schema", "sink_table")) for r in rows})
-    if not sinks:
+    sinks = _sink_lists(rows)
+    if sinks is None:
         return
-    cur.execute(q.mixed_sinks_for_sql(), tuple([sink[at] for sink in sinks] for at in range(3)))
+    cur.execute(q.mixed_sinks_for_sql(), sinks)
     mixed = [r[0] for r in cur.fetchall()]
     if mixed:
         raise HTTPException(409, f"sink {mixed[0]} would be claimed by a dedicated row and by other rows; "
@@ -261,9 +269,65 @@ def _split_warning(databases: List[dict], jobs: List[dict]) -> dict:
 SPLIT_DATABASE_WARNING = "split_database"
 
 
+class WriteChecks(NamedTuple):
+    """What a write's warnings are measured against, read before the write in its transaction: the databases that
+    already had tables in more than one ingestion group, and the targets that already mixed load types."""
+    split: Set[str]
+    mixed_load: Set[str]
+
+
+def _checks_before(cur, rows) -> WriteChecks:
+    """Before writing control rows, in the same transaction: the state _write_warnings leaves out of what it warns of."""
+    return WriteChecks(_split_database_keys(cur, rows), {found["target"] for found in _mixed_load_targets(cur, rows)})
+
+
+def _write_warnings(cur, rows, before: WriteChecks) -> List[dict]:
+    """After writing control rows, in the same transaction: the warnings the write earns, none of which holds it
+    back (the write stands): a database it splits over several ingestion groups, and a shared target whose tables it
+    makes load in different ways."""
+    return _split_database_warnings(cur, rows, before.split) + _mixed_load_warnings(cur, rows, before.mixed_load)
+
+
+def _mixed_load_targets(cur, rows) -> List[dict]:
+    """The shared targets among the rows' that are mixed now (queries.mixed_load_sinks_sql), each as {target, full,
+    other, append} (mixed_load.mixed_targets). Rows without a client_id write a target of their own and are left out,
+    so a write of dedicated tables asks nothing. One index probe per target."""
+    sinks = _sink_lists([row for row in rows if row.get("client_id")])
+    if sinks is None:
+        return []
+    cur.execute(q.mixed_load_sinks_sql(), sinks)
+    return _mixed_load_found(cur.fetchall())
+
+
+def _mixed_load_targets_of_groups(cur, groups) -> List[dict]:
+    """_mixed_load_targets for every shared target the rows of some ingestion groups write, as they are now."""
+    cur.execute(q.mixed_load_sinks_of_groups_sql(), (list(groups),))
+    return _mixed_load_found(cur.fetchall())
+
+
+def _mixed_load_found(found) -> List[dict]:
+    """The rows of the mixed-load queries as the targets mixed_load builds its warning from."""
+    return [{"target": sink, "full": int(full), "other": int(other), "append": int(appending) > 0}
+            for sink, full, other, appending in found]
+
+
+def _mixed_load_warnings(cur, rows, already_mixed: Collection[str] = frozenset()) -> List[dict]:
+    """After writing control rows, in the same transaction: a warning, as a list of at most one, when a shared target
+    they write now mixes a full reload with another load type and did not before the write (already_mixed, from
+    _checks_before). A target that was mixed already says nothing. The write stands; each run of a full reload table
+    rewrites its slice, which the warning names."""
+    return mixed_load.warnings(_mixed_load_targets(cur, rows), already_mixed)
+
+
 def _merged_warnings(warnings: List[dict]) -> List[dict]:
-    """Split-database warnings of several transactions of one write (a large Create or Add writes a chunk of databases
-    at a time) as one warning naming every database and job once."""
+    """The warnings of several transactions of one write (a large Create or Add writes a chunk of databases at a time),
+    one of each kind: the split-database warning naming every database and job once, and the mixed-load warning
+    naming every target once."""
+    return _merged_split_warnings(warnings) + mixed_load.merged(warnings)
+
+
+def _merged_split_warnings(warnings: List[dict]) -> List[dict]:
+    """The split-database warnings among several as one warning."""
     databases: Dict[str, List[str]] = {}
     jobs: Dict[object, dict] = {}
     for warning in warnings:
@@ -429,12 +493,12 @@ def _rewrite_rollups_for_groups(cur, groups) -> None:
 def _apply_plans(cur, rows, plans, user, batch) -> List[dict]:
     """Write planned edits (queries.plan_edit) inside the caller's transaction: each changed field, its change log
     line, a reseed where the plan needs one, then the mixed-sink check over the rows as they now are. Returns the
-    split-database warnings for the rows as they now are (_split_database_warnings)."""
+    warnings for the rows as they now are (_write_warnings)."""
     _refuse_connection_edits(rows, plans, cur=cur, user=user)
     by_id = {r["id"]: r for r in rows}
     before = [(by_id[p["id"]]["task_collection"], by_id[p["id"]].get("src_database")) for p in plans]
     edited = [dict(by_id[p["id"]], **{f: v[1] for f, v in p["changes"].items()}) for p in plans]
-    already_split = _split_database_keys(cur, edited)
+    before_write = _checks_before(cur, edited)
     for p in plans:
         if not p["changes"]:
             continue
@@ -449,7 +513,7 @@ def _apply_plans(cur, rows, plans, user, batch) -> List[dict]:
             cur.execute(q.log_reseed_sql(), (f"edit:{p['reseed']}", [p["id"]]))
     _rewrite_rollups(cur, before + [(row["task_collection"], row.get("src_database")) for row in edited])
     _refuse_mixed_sinks(cur, edited)
-    return _split_database_warnings(cur, edited, already_split)
+    return _write_warnings(cur, edited, before_write)
 
 
 def _locked_rows(cur, ids):
@@ -2151,7 +2215,8 @@ def edit_ingestion_job_settings(job_id: int, body: JobSettingsRequest, request: 
     """Preview (dry_run, the default) or apply a settings edit to every table of a job, in set-based SQL
     (job_settings_sql): templates filled per row, a reseed where a change-tracked or cursor table gets a new
     target or client_id, one change-log line per database. Anything it can't take is a 422 naming why. Applying
-    is one transaction under the job's lock and every group's run lock. A job that isn't Ready changes the settings its
+    is one transaction under the job's lock and every group's run lock, and answers with the warnings the edit earns
+    (a shared target it makes mix a full reload with another load type, as every write that does says so). A job that isn't Ready changes the settings its
     record keeps instead, while its tables are still read (_edit_stored_settings)."""
     import psycopg
     groups = _job_groups(job_id)
@@ -2181,6 +2246,7 @@ def edit_ingestion_job_settings(job_id: int, body: JobSettingsRequest, request: 
             now, found = checked(fetch, groups)
             if not found["summary"]["changed"]:
                 return found
+            mixed_before = {found["target"] for found in _mixed_load_targets_of_groups(cur, groups)}
             result = jss.apply(cur, groups, body.settings, now, _user(request), uuid.uuid4().hex[:12])
             _rewrite_rollups_for_groups(cur, groups)
             _touch(cur, _user(request), [job_id])
@@ -2189,6 +2255,7 @@ def edit_ingestion_job_settings(job_id: int, body: JobSettingsRequest, request: 
                 raise HTTPException(409, f"target {mixed[0]} would be claimed by a dedicated table and by others; "
                                          "a target is either one table's own or shared by client_id. Nothing was changed")
             found["summary"].update(changed=result["changed"], reseed=result["reseed"], applied=True)
+            found["warnings"] = mixed_load.warnings(_mixed_load_targets_of_groups(cur, groups), mixed_before)
             return found
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "another control row already writes one of those targets (or that target and "
@@ -2562,7 +2629,7 @@ def add_job_databases(job_id: int, body: JobDatabasesRequest, request: Request):
                 _refuse_connection_rows(connection, plan["new"], cur=cur)
             else:
                 _refuse_host_reads(plan["new"], user, {})
-            already_split = _split_database_keys(cur, plan["new"])
+            before_write = _checks_before(cur, plan["new"])
             written = _insert_controls(cur, plan["new"], user, batch, skip_taken=True, progress=progress)
             off = [control_id for row, control_id in written if not row["task_enabled"]]
             if off:
@@ -2575,7 +2642,7 @@ def add_job_databases(job_id: int, body: JobDatabasesRequest, request: Request):
                     _log_lines(cur, [(user, "enable" if enabled else "disable", i, None, "task_enabled", not enabled,
                                       enabled, None, batch) for i in ids])
             _refuse_mixed_sinks(cur, plan["new"])
-            warnings = _split_database_warnings(cur, plan["new"], already_split)
+            warnings = _write_warnings(cur, plan["new"], before_write)
             if plan["new_groups"]:
                 _, members = _load_schedule(job_id, cur)
                 active = [m for m in members if m["removed_at"] is None]
@@ -2795,10 +2862,10 @@ def _write_planned_tables(cur, job: dict, plan: dict, user: str, batch: str, pro
         _refuse_connection_rows(connection, rows, cur=cur)
     else:
         _refuse_host_reads(rows, reader or user, {})
-    already_split = _split_database_keys(cur, rows)
+    before_write = _checks_before(cur, rows)
     written = _insert_controls(cur, rows, user, batch, skip_taken=skip_taken, progress=progress)
     _refuse_mixed_sinks(cur, [row for row, _ in written])
-    warnings = _split_database_warnings(cur, [row for row, _ in written], already_split)
+    warnings = _write_warnings(cur, [row for row, _ in written], before_write)
     if plan["new_groups"]:
         _, members = _load_schedule(job_id, cur)
         active = [m for m in members if m["removed_at"] is None]
@@ -3224,12 +3291,12 @@ def add_table(row: dict, request: Request):
     _refuse_host_reads([row], _user(request))
     with _write() as cur:
         _lock_collections(cur, [row.get("task_collection")])
-        already_split = _split_database_keys(cur, [row])
+        before_write = _checks_before(cur, [row])
         cur.execute(q.insert_control_sql(), q.control_params(row))
         new_id = cur.fetchone()[0]
         _rewrite_rollups(cur, [(row.get("task_collection"), row.get("src_database"))])
         _refuse_mixed_sinks(cur, [row])
-        warnings = _split_database_warnings(cur, [row], already_split)
+        warnings = _write_warnings(cur, [row], before_write)
         _log(cur, _user(request), "add", new_id, row.get("task_collection"))
         _touch(cur, _user(request), groups=[row.get("task_collection")])
     return {"id": new_id, "warnings": warnings}
@@ -4312,7 +4379,7 @@ def register(discovery_id: str, body: RegisterRequest, request: Request):
         batch = uuid.uuid4().hex[:12]
         with _write() as cur:
             _lock_collections(cur, [body.task_collection])
-            already_split = _split_database_keys(cur, [row for _, row in valid])
+            before_write = _checks_before(cur, [row for _, row in valid])
             for name, row in valid:
                 cur.execute(q.insert_control_if_absent_sql(), q.control_params(row))
                 res = cur.fetchone()
@@ -4323,7 +4390,7 @@ def register(discovery_id: str, body: RegisterRequest, request: Request):
                                 "errors": [] if res else ["sink already used by another control row"]})
             _rewrite_rollups(cur, [(row.get("task_collection"), row.get("src_database")) for _, row in valid])
             _refuse_mixed_sinks(cur, [row for _, row in valid])     # all or nothing, like an edit
-            warnings = _split_database_warnings(cur, [row for _, row in valid], already_split)
+            warnings = _write_warnings(cur, [row for _, row in valid], before_write)
             _touch(cur, _user(request), groups=[body.task_collection])
     else:
         results += [{"table": name, "status": "valid", "errors": []} for name, _ in valid]
@@ -4387,7 +4454,7 @@ def import_csv(body: ImportRequest, request: Request):
             adding = [line["row"] for line in plan["lines"] if line["status"] != "registered"]
             _refuse_rows_off_connections(adding, cur=cur)
             _refuse_host_reads(adding, _user(request))
-            already_split = _split_database_keys(cur, adding)
+            before_write = _checks_before(cur, adding)
             for line in plan["lines"]:
                 if line["status"] == "registered":
                     line["status"] = "skipped"
@@ -4403,7 +4470,7 @@ def import_csv(body: ImportRequest, request: Request):
             imported = [line["row"] for line in plan["lines"] if line["status"] == "imported"]
             _rewrite_rollups(cur, [(row.get("task_collection"), row.get("src_database")) for row in imported])
             _refuse_mixed_sinks(cur, imported)
-            warnings = _split_database_warnings(cur, imported, already_split)
+            warnings = _write_warnings(cur, imported, before_write)
             _touch(cur, _user(request), groups=[group])
     return {"task_collection": group, "settings": plan["settings"], "counts": counted(plan["lines"]),
             "lines": [{k: v for k, v in line.items() if k != "row"} for line in plan["lines"]], "warnings": warnings}
@@ -4804,10 +4871,10 @@ def _write_chunk(cur, plans: List[dict], job: ChunkJob, state: dict) -> List[dic
             job.check(cur, todo)
         else:
             _refuse_job_rows(todo, job.connection, job.user, cur=cur)
-        already_split = _split_database_keys(cur, todo)
+        before_write = _checks_before(cur, todo)
         _insert_controls(cur, todo, job.user, job.batch, log_per_statement=by_database.TABLES_PER_TRANSACTION)
         _refuse_mixed_sinks(cur, todo)
-        warnings = _split_database_warnings(cur, todo, already_split)
+        warnings = _write_warnings(cur, todo, before_write)
     else:
         warnings = []
     if groups:
@@ -5318,10 +5385,10 @@ def _create_job(body: NewJobRequest, request: Request, inline: bool = False, pro
                                                       run.job_variant or "default", run.stagger, run.paused,
                                                       run.notify_emails or None, json.dumps(stored), user or None))
                 sid = cur.fetchone()[0]
-                already_split = _split_database_keys(cur, rows)
+                before_write = _checks_before(cur, rows)
                 _insert_controls(cur, rows, user, batch, progress=progress)
                 _refuse_mixed_sinks(cur, rows)
-                warnings = _split_database_warnings(cur, rows, already_split)
+                warnings = _write_warnings(cur, rows, before_write)
                 for group in plan["groups"]:
                     cur.execute(q.insert_member_sql(), (sid, group, offs[group]))
                 _log_lines(cur, [(user, "schedule_create", None, group, "schedule", None,

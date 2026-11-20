@@ -2,7 +2,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api, type Row } from "../api";
-import { Busy, Cols, Cut, StatusLine, Crumbs, ErrorBox, Info, Menu, Modal, Notice, PageHead, Section, Twisty, fmtInt, oneLine, plural, useConfirm, Chevron } from "../components";
+import { Busy, Cols, Cut, StatusLine, Crumbs, ErrorBox, Info, Menu, Modal, Notice, PageHead, Section, Twisty, WriteWarnings, fmtInt, oneLine, plural, useConfirm, Chevron } from "../components";
 import { CADENCES, IdentityFields, ParameterField, ParameterFields, RunFields, WritesFields } from "./jobForm";
 import { DiscoverDialog, discardDrafts } from "./Discover";
 import { serverRowCells, targetBlock } from "./previewRows";
@@ -194,6 +194,8 @@ export default function NewJob() {
         ? <TaskProgress task={task} onResume={() => create.mutate(create.variables as Row)} />
         : <ErrorBox error={isUnconfirmed(create.error) ? null : create.error} />}
       {create.data && !create.data.created && <Notice tone="warn">Not created: fix the invalid lines below first.</Notice>}
+      {/* What the tables would do to the targets they share, before Create: the preview's own warning, as the Jobs pages warn on a setting before it is saved. */}
+      <WriteWarnings warnings={summary?.warnings} />
 
       <fieldset className="create-lock" disabled={create.isPending}>
         <Section title="What it ingests"

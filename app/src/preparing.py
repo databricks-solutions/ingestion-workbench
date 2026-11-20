@@ -290,10 +290,11 @@ def found(record: dict, entries: Iterable[dict], counts: Dict[str, int], now: Op
 
 
 def with_warnings(record: dict, warnings: List[dict]) -> dict:
-    """The record with the write's warnings (the split-database warning, as Create answers it when it waits for its
-    write), each listing at most LISTED databases: the record is read by every page of jobs, and the warning's message
-    counts them all."""
-    return dict(record, warnings=[dict(warning, databases=list(warning.get("databases") or [])[:LISTED])
+    """The record with the write's warnings (the split-database and mixed-load warnings, as Create answers them when it
+    waits for its write), each listing at most LISTED databases or targets: the record is read by every page of jobs,
+    and the warning's message counts them all."""
+    return dict(record, warnings=[dict(warning, **{key: list(warning[key] or [])[:LISTED]
+                                                   for key in ("databases", "targets") if key in warning})
                                   for warning in warnings])
 
 
