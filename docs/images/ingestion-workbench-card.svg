@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="'DM Sans', Helvetica, Arial, sans-serif">
+<title>Ingestion Workbench</title>
+<desc>Two ingestion patterns. Large tables: one multi-terabyte source table is split into key ranges, read by many parallel queries, N at a time, on a job cluster, and written to one Delta table. Multi-tenant estates: thousands of tenant databases are checked for changes, only the changed ones are read by one job cluster, and every tenant's rows land in a few shared Delta tables, tagged by tenant.</desc>
+<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#1B3139"/></marker></defs>
+<rect width="1200" height="630" fill="#FFFFFF"/>
+<rect x="0" y="0" width="1200" height="8" fill="#FF3621"/>
+<text x="48" y="74" font-size="40" font-weight="700" fill="#1B3139">Ingestion Workbench</text>
+<text x="48" y="108" font-size="20" fill="#5A6F77">Multi-TB tables and thousands of tenant databases into Delta, at scale</text>
+<rect x="40" y="140" width="545" height="410" rx="10" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<rect x="615" y="140" width="545" height="410" rx="10" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<text x="66" y="182" font-size="26" font-weight="700" fill="#1B3139" text-anchor="start">Large tables</text>
+<text x="66" y="210" font-size="16" font-weight="400" fill="#5A6F77" text-anchor="start">one table, many parallel range queries</text>
+<text x="641" y="182" font-size="26" font-weight="700" fill="#1B3139" text-anchor="start">Multi-tenant estates</text>
+<text x="641" y="210" font-size="16" font-weight="400" fill="#5A6F77" text-anchor="start">thousands of databases, a few shared tables</text>
+<rect x="70" y="250" width="110" height="250" rx="8" fill="#F9F7F4" stroke="#1B3139" stroke-width="1.25"/>
+<rect x="78" y="258.0" width="94" height="24.0" rx="3" fill="#FABFBA"/>
+<rect x="78" y="288.0" width="94" height="24.0" rx="3" fill="#FF5F46"/>
+<rect x="78" y="318.0" width="94" height="24.0" rx="3" fill="#FF5F46"/>
+<rect x="78" y="348.0" width="94" height="24.0" rx="3" fill="#FABFBA"/>
+<rect x="78" y="378.0" width="94" height="24.0" rx="3" fill="#FF5F46"/>
+<rect x="78" y="408.0" width="94" height="24.0" rx="3" fill="#FF5F46"/>
+<rect x="78" y="438.0" width="94" height="24.0" rx="3" fill="#FABFBA"/>
+<rect x="78" y="468.0" width="94" height="24.0" rx="3" fill="#FABFBA"/>
+<text x="125.0" y="526" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">multi-TB source table</text>
+<text x="125.0" y="238" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">key ranges</text>
+<path d="M184 300.0 C220 300.0 210 330 246 330" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<path d="M184 330.0 C220 330.0 210 360 246 360" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<path d="M184 390.0 C220 390.0 210 390 246 390" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<path d="M184 420.0 C220 420.0 210 420 246 420" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<rect x="250" y="300" width="150" height="150" rx="10" fill="#F9F7F4" stroke="#1B3139" stroke-width="1.25"/>
+<svg x="264" y="314" width="30" height="30" viewBox="0 0 512 512" fill="none"><path d="M220.408 401.342L362.785 257.242L220.408 113.143L220.408 56L299.582 56L299.582 136.544L314.387 142.792L370.291 85.8379L426.713 143.32L370.807 200.274L376.941 215.356H456.002V296.644H376.941L370.807 311.726L426.713 368.68L370.291 426.162L314.385 369.208L299.582 375.456L299.582 456H220.408L220.408 401.342Z" fill="#FABFBA"/>
+<path d="M156.584 100.984V100.722L308.78 256.001L156.584 411.281V411.004L141.711 426.159L85.2895 368.676L141.196 311.722L135.061 296.641H56V215.352H135.061L141.196 200.271L85.2895 143.317L141.711 85.8345L156.584 100.984Z" fill="#FF5F46"/></svg>
+<text x="302" y="336" font-size="17" font-weight="700" fill="#1B3139" text-anchor="start">Job cluster</text>
+<rect x="270" y="358" width="110" height="10" rx="5" fill="#FF5F46"/>
+<rect x="270" y="378" width="110" height="10" rx="5" fill="#FABFBA"/>
+<rect x="270" y="398" width="110" height="10" rx="5" fill="#FF5F46"/>
+<rect x="270" y="418" width="110" height="10" rx="5" fill="#FABFBA"/>
+<text x="325.0" y="476" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">N queries at a time</text>
+<path d="M404 375.0 L434 375.0" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<rect x="440" y="330" width="120" height="90" rx="10" fill="#FFFFFF" stroke="#FF3621" stroke-width="2"/>
+<svg x="480.0" y="342" width="40" height="40" viewBox="0 0 512 512" fill="none"><path d="M255.38 185.263L194.172 220.632V291.368L255.38 326.737L316.588 291.368V220.632L255.38 185.263Z" fill="#FF5F46"/>
+<path d="M384.434 181.579H454.86L419.462 120.421L384.434 181.579Z" fill="#FF5F46"/>
+<path d="M384.434 330.79L419.831 391.947L455.229 330.79H384.434Z" fill="#FF5F46"/>
+<path d="M219.98 466H290.407L255.009 404.842L219.98 466Z" fill="#FF5F46"/>
+<path d="M55.5312 330.79L90.9288 391.947L126.326 330.79H55.5312Z" fill="#FF5F46"/>
+<path d="M55.5312 181.579H125.958L90.5601 120.421L55.5312 181.579Z" fill="#FF5F46"/>
+<path d="M219.98 46L255.378 107.158L290.776 46H219.98Z" fill="#FF5F46"/>
+<path d="M322.487 58.1582L281.559 128.895L352.354 169.79L393.282 99.0529L322.487 58.1582Z" fill="#FABFBA"/>
+<path d="M460.392 215.105H378.535V296.895H460.392V215.105Z" fill="#FABFBA"/>
+<path d="M352.354 342.579L281.559 383.474L322.487 454.211L393.282 413.316L352.354 342.579Z" fill="#FABFBA"/>
+<path d="M158.038 342.579L117.109 413.316L187.905 454.211L228.833 383.474L158.038 342.579Z" fill="#FABFBA"/>
+<path d="M131.857 215.105H50V296.895H131.857V215.105Z" fill="#FABFBA"/>
+<path d="M187.905 58.1582L117.109 99.0529L158.038 169.79L228.833 128.895L187.905 58.1582Z" fill="#FABFBA"/></svg>
+<text x="500.0" y="404" font-size="16" font-weight="700" fill="#1B3139" text-anchor="middle">Delta table</text>
+<text x="500.0" y="446" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">swapped in atomically</text>
+<path d="M650 249.32 L650 274.68 A12.0 4.32 0 0 0 674 274.68 L674 249.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="662.0" cy="249.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M684 249.32 L684 274.68 A12.0 4.32 0 0 0 708 274.68 L708 249.32" fill="#FF5F46" stroke="#1B3139" stroke-width="1.25"/>
+<ellipse cx="696.0" cy="249.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<path d="M718 249.32 L718 274.68 A12.0 4.32 0 0 0 742 274.68 L742 249.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="730.0" cy="249.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M752 249.32 L752 274.68 A12.0 4.32 0 0 0 776 274.68 L776 249.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="764.0" cy="249.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M650 295.32 L650 320.68 A12.0 4.32 0 0 0 674 320.68 L674 295.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="662.0" cy="295.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M684 295.32 L684 320.68 A12.0 4.32 0 0 0 708 320.68 L708 295.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="696.0" cy="295.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M718 295.32 L718 320.68 A12.0 4.32 0 0 0 742 320.68 L742 295.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="730.0" cy="295.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M752 295.32 L752 320.68 A12.0 4.32 0 0 0 776 320.68 L776 295.32" fill="#FF5F46" stroke="#1B3139" stroke-width="1.25"/>
+<ellipse cx="764.0" cy="295.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<path d="M650 341.32 L650 366.68 A12.0 4.32 0 0 0 674 366.68 L674 341.32" fill="#FF5F46" stroke="#1B3139" stroke-width="1.25"/>
+<ellipse cx="662.0" cy="341.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<path d="M684 341.32 L684 366.68 A12.0 4.32 0 0 0 708 366.68 L708 341.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="696.0" cy="341.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M718 341.32 L718 366.68 A12.0 4.32 0 0 0 742 366.68 L742 341.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="730.0" cy="341.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M752 341.32 L752 366.68 A12.0 4.32 0 0 0 776 366.68 L776 341.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="764.0" cy="341.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M650 387.32 L650 412.68 A12.0 4.32 0 0 0 674 412.68 L674 387.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="662.0" cy="387.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M684 387.32 L684 412.68 A12.0 4.32 0 0 0 708 412.68 L708 387.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="696.0" cy="387.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M718 387.32 L718 412.68 A12.0 4.32 0 0 0 742 412.68 L742 387.32" fill="#FF5F46" stroke="#1B3139" stroke-width="1.25"/>
+<ellipse cx="730.0" cy="387.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<path d="M752 387.32 L752 412.68 A12.0 4.32 0 0 0 776 412.68 L776 387.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="764.0" cy="387.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M650 433.32 L650 458.68 A12.0 4.32 0 0 0 674 458.68 L674 433.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="662.0" cy="433.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M684 433.32 L684 458.68 A12.0 4.32 0 0 0 708 458.68 L708 433.32" fill="#FF5F46" stroke="#1B3139" stroke-width="1.25"/>
+<ellipse cx="696.0" cy="433.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<path d="M718 433.32 L718 458.68 A12.0 4.32 0 0 0 742 458.68 L742 433.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="730.0" cy="433.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<path d="M752 433.32 L752 458.68 A12.0 4.32 0 0 0 776 458.68 L776 433.32" fill="#EEEDE9" stroke="#9AA8AD" stroke-width="1.25"/>
+<ellipse cx="764.0" cy="433.32" rx="12.0" ry="4.32" fill="#FFFFFF" stroke="#9AA8AD" stroke-width="1.25"/>
+<text x="713" y="495" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">1,000s of databases</text>
+<path d="M658 513.52 L658 528.48 A7.0 2.52 0 0 0 672 528.48 L672 513.52" fill="#FF5F46" stroke="#1B3139" stroke-width="1.25"/>
+<ellipse cx="665.0" cy="513.52" rx="7.0" ry="2.52" fill="#FFFFFF" stroke="#1B3139" stroke-width="1.25"/>
+<text x="680" y="527" font-size="14" font-weight="400" fill="#5A6F77" text-anchor="start">changed since the last run</text>
+<rect x="805" y="235" width="190" height="64" rx="10" fill="#F9F7F4" stroke="#1B3139" stroke-width="1.25"/>
+<svg x="817" y="253" width="28" height="28" viewBox="0 0 512 512" fill="none"><path d="M220.408 401.342L362.785 257.242L220.408 113.143L220.408 56L299.582 56L299.582 136.544L314.387 142.792L370.291 85.8379L426.713 143.32L370.807 200.274L376.941 215.356H456.002V296.644H376.941L370.807 311.726L426.713 368.68L370.291 426.162L314.385 369.208L299.582 375.456L299.582 456H220.408L220.408 401.342Z" fill="#FABFBA"/>
+<path d="M156.584 100.984V100.722L308.78 256.001L156.584 411.281V411.004L141.711 426.159L85.2895 368.676L141.196 311.722L135.061 296.641H56V215.352H135.061L141.196 200.271L85.2895 143.317L141.711 85.8345L156.584 100.984Z" fill="#FF5F46"/></svg>
+<text x="853" y="263" font-size="17" font-weight="700" fill="#1B3139" text-anchor="start">Check</text>
+<text x="853" y="283" font-size="14" font-weight="400" fill="#5A6F77" text-anchor="start">what changed?</text>
+<rect x="805" y="360" width="190" height="64" rx="10" fill="#F9F7F4" stroke="#1B3139" stroke-width="1.25"/>
+<svg x="817" y="378" width="28" height="28" viewBox="0 0 512 512" fill="none"><path d="M220.408 401.342L362.785 257.242L220.408 113.143L220.408 56L299.582 56L299.582 136.544L314.387 142.792L370.291 85.8379L426.713 143.32L370.807 200.274L376.941 215.356H456.002V296.644H376.941L370.807 311.726L426.713 368.68L370.291 426.162L314.385 369.208L299.582 375.456L299.582 456H220.408L220.408 401.342Z" fill="#FABFBA"/>
+<path d="M156.584 100.984V100.722L308.78 256.001L156.584 411.281V411.004L141.711 426.159L85.2895 368.676L141.196 311.722L135.061 296.641H56V215.352H135.061L141.196 200.271L85.2895 143.317L141.711 85.8345L156.584 100.984Z" fill="#FF5F46"/></svg>
+<text x="853" y="388" font-size="17" font-weight="700" fill="#1B3139" text-anchor="start">Job cluster</text>
+<text x="853" y="408" font-size="14" font-weight="400" fill="#5A6F77" text-anchor="start">N queries at a time</text>
+<path d="M780 285 L799 267.0" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<path d="M900.0 303 L900.0 354" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<text x="910.0" y="335" font-size="13" font-weight="400" fill="#5A6F77" text-anchor="start">only the</text>
+<text x="910.0" y="350" font-size="13" font-weight="400" fill="#5A6F77" text-anchor="start">changed ones</text>
+<path d="M780 395 L799 392.0" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<rect x="1036" y="290" width="120" height="70" rx="10" fill="#FFFFFF" stroke="#F3A79C" stroke-width="1.25"/>
+<rect x="1028" y="280" width="120" height="70" rx="10" fill="#FFFFFF" stroke="#F3A79C" stroke-width="1.25"/>
+<rect x="1020" y="270" width="120" height="70" rx="10" fill="#FFFFFF" stroke="#FF3621" stroke-width="2"/>
+<svg x="1062.0" y="278" width="36" height="36" viewBox="0 0 512 512" fill="none"><path d="M255.38 185.263L194.172 220.632V291.368L255.38 326.737L316.588 291.368V220.632L255.38 185.263Z" fill="#FF5F46"/>
+<path d="M384.434 181.579H454.86L419.462 120.421L384.434 181.579Z" fill="#FF5F46"/>
+<path d="M384.434 330.79L419.831 391.947L455.229 330.79H384.434Z" fill="#FF5F46"/>
+<path d="M219.98 466H290.407L255.009 404.842L219.98 466Z" fill="#FF5F46"/>
+<path d="M55.5312 330.79L90.9288 391.947L126.326 330.79H55.5312Z" fill="#FF5F46"/>
+<path d="M55.5312 181.579H125.958L90.5601 120.421L55.5312 181.579Z" fill="#FF5F46"/>
+<path d="M219.98 46L255.378 107.158L290.776 46H219.98Z" fill="#FF5F46"/>
+<path d="M322.487 58.1582L281.559 128.895L352.354 169.79L393.282 99.0529L322.487 58.1582Z" fill="#FABFBA"/>
+<path d="M460.392 215.105H378.535V296.895H460.392V215.105Z" fill="#FABFBA"/>
+<path d="M352.354 342.579L281.559 383.474L322.487 454.211L393.282 413.316L352.354 342.579Z" fill="#FABFBA"/>
+<path d="M158.038 342.579L117.109 413.316L187.905 454.211L228.833 383.474L158.038 342.579Z" fill="#FABFBA"/>
+<path d="M131.857 215.105H50V296.895H131.857V215.105Z" fill="#FABFBA"/>
+<path d="M187.905 58.1582L117.109 99.0529L158.038 169.79L228.833 128.895L187.905 58.1582Z" fill="#FABFBA"/></svg>
+<text x="1080.0" y="332" font-size="15" font-weight="700" fill="#1B3139" text-anchor="middle">Shared tables</text>
+<path d="M999 392.0 C1015 392.0 990 320 1014 320" stroke="#1B3139" stroke-width="1.75" fill="none" marker-end="url(#arw)"/>
+<text x="1088.0" y="390" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">rows tagged</text>
+<text x="1088.0" y="408" font-size="15" font-weight="400" fill="#5A6F77" text-anchor="middle">by tenant</text>
+<svg x="48" y="568" width="30" height="30" viewBox="0 0 512 512" fill="none"><path d="M448 305.954H447.994C419.48 315.543 386.842 321.022 352 321.022C317.158 321.022 284.484 315.543 256.006 305.954H64V203.887H448V305.954ZM160 290.251C125.156 290.251 92.5155 295.961 64 305.953H256C227.52 295.961 194.844 290.251 160 290.251Z" fill="#FABFBA"/>
+<path d="M160.451 327.787C195.132 327.787 227.655 332.986 256.001 342.085H256C284.346 351.184 316.868 356.383 351.549 356.383C385.146 356.383 416.684 351.504 444.426 342.927L447.099 342.085H448V447.999H64V342.085H64.9023C93.2839 332.986 125.771 327.787 160.451 327.787Z" fill="#FF5F46"/>
+<rect x="64" y="64" width="384" height="105.914" fill="#FABFBA"/></svg>
+<text x="88" y="590" font-size="17" font-weight="400" fill="#5A6F77" text-anchor="start">Lakebase state  ·  Lakeflow Jobs  ·  UC connection or JDBC  ·  Delta Lake  ·  Unity Catalog  ·  operations app</text>
+</svg>

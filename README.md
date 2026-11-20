@@ -9,6 +9,8 @@ estates of many databases: thousands of source databases and hundreds of thousan
 **operations app**, deployed with the rest, lets you find the tables on a source, make ingestion jobs from them and watch them run, without
 writing SQL.
 
+![Ingestion Workbench at a glance: a large table is split into key ranges, read by many parallel queries and swapped into its Delta table at once; thousands of tenant databases are checked for changes, and only the changed ones are loaded into a few shared tables, each row tagged by tenant](docs/images/ingestion-workbench-card.svg)
+
 ## How it works
 
 ![How the parts fit: sources are read by the check and ingest jobs, which write Delta tables and record their state in Lakebase; the app reads table lists through its SQL warehouse and writes the control rows](docs/images/how-it-fits.svg)
