@@ -273,9 +273,10 @@ collections writing the same sinks.
 
 ## Append sinks (optional)
 
-With `control.write_mode = 'append'` (load types `ct` and `full`), the sink is a change log rather
-than a copy of the source table: nothing in it is updated or deleted, and every write adds rows
-with four extra columns:
+A job made with the operations app's New ingestion job starts in append mode for its change-tracked tables, with
+fan-in (shared sinks); a control row written without a mode merges. With `control.write_mode = 'append'` (load
+types `ct` and `full`), the sink is a change log rather than a copy of the source table: nothing in it is updated or
+deleted, and every write adds rows with four extra columns:
 
 | Column | Value |
 |---|---|

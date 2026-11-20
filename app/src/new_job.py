@@ -23,9 +23,18 @@ DEFAULT_GROUPS_PER_SERVER = 4
 # 5,000-line cap (config_import.MAX_LINES).
 MAX_LINES = 120_000
 MAX_GROUPS_PER_SERVER = 64
-DEFAULTS = {"src_type": "sqlserver", "load_type": "ct", "fan_in": False, "write_mode_changes": "merge",
+# A new job appends its change-tracked tables as change logs into shared target tables (fan-in): the engine then puts
+# several databases' copies of a table in one Delta commit (batch_append), the setup behind the fastest loads. Full
+# reloads still merge, as an append would add a whole copy of the table each run.
+DEFAULTS = {"src_type": "sqlserver", "load_type": "ct", "fan_in": True, "write_mode_changes": "append",
             "write_mode_full": "merge", "sink_catalog": "", "sink_schema": "", "sink_table": "{table}",
             "client_id": js.SHARED_CLIENT_ID, "identity": {}, "freshness_sla_minutes": None}
+# What an existing job takes for a setting its tables don't give and its record doesn't keep (job_inputs): the defaults
+# every job had before the new-job ones changed, so adding tables to a job never changes how it writes.
+EXISTING_JOB_DEFAULTS = {"fan_in": False, "write_mode_changes": "merge", "client_id": js.LEGACY_CLIENT_ID}
+# The settings a job's tables give no value for only while it has no table of that kind (a job of full reloads says
+# nothing of change-tracked tables): tables added to it take them from what Create was asked for.
+WRITE_MODE_SETTINGS = ("write_mode_changes", "write_mode_full")
 
 
 BOOLEAN_SETTINGS = ("fan_in",)
@@ -46,19 +55,19 @@ def given_errors(given: dict) -> List[str]:
 
 
 def settings_of(given: dict, new_job: bool = False) -> dict:
-    """The job's settings as given, each blank or missing one at its default. A job made before the server went into
-    the key keeps the database alone as its client_id, so only a new job takes the new default."""
-    out = dict(DEFAULTS)
-    if not new_job:
-        out["client_id"] = js.LEGACY_CLIENT_ID
+    """The job's settings as given, each blank or missing one at its default. Only a new job takes the new defaults
+    (append with fan-in, and the server in the client_id); an existing job keeps those it was made with
+    (EXISTING_JOB_DEFAULTS)."""
+    defaults = DEFAULTS if new_job else {**DEFAULTS, **EXISTING_JOB_DEFAULTS}
+    out = dict(defaults)
     out.update({k: v for k, v in (given or {}).items() if k in DEFAULTS and v is not None})
     if not str(out["client_id"] or "").strip():
-        out["client_id"] = js.SHARED_CLIENT_ID if new_job else js.LEGACY_CLIENT_ID
+        out["client_id"] = defaults["client_id"]
     for name in BOOLEAN_SETTINGS:
         try:
             out[name] = q.parse_bool(out[name])
         except ValueError:
-            out[name] = DEFAULTS[name]      # given_errors reports it, and nothing is written while it does
+            out[name] = defaults[name]      # given_errors reports it, and nothing is written while it does
     # Only an identity left out takes the defaults: an empty one is the user removing them.
     if new_job and out["fan_in"] and (given or {}).get("identity") is None:
         out["identity"] = dict(js.SHARED_IDENTITY)
@@ -343,18 +352,20 @@ _JOB_SETTINGS = ("fan_in", "write_mode_changes", "write_mode_full", "sink_catalo
 
 
 def job_inputs(job_name: str, job_rows: List[dict], groups_per_server: placement.Groups = None,
-               unity_catalog: bool = False) -> dict:
+               unity_catalog: bool = False, created_with: Optional[dict] = None) -> dict:
     """What a job's own rows say about the tables added to it: {"errors": the job's settings differ between its tables
     (nothing is planned while there are any), "given": the settings each table takes, "group_of": where a database
     goes (a database the job has keeps its group, or for one held in several groups each new table goes to the lightest
     of them; a new one joins its server's groups, a new server gets new groups),
-    "have": the (target, client_id) pairs the job already writes, "known": its groups}."""
+    "have": the (target, client_id) pairs the job already writes, "known": its groups}. created_with is what Create was
+    asked for (the job's record): a write mode no table of the job gives comes from it (WRITE_MODE_SETTINGS)."""
     read = js.read(job_rows, unity_catalog)
     mixed = [name for name in _JOB_SETTINGS if "mixed" in read.get(name, {})]
     if mixed:
         return {"errors": [f"the job's {name.replace('_', ' ')} differs between its tables: set it in Edit first"
                            for name in mixed], "given": {}, "group_of": None, "join": None, "have": set(), "known": set()}
-    given = {name: read[name]["value"] for name in _JOB_SETTINGS if read.get(name, {}).get("value") is not None}
+    given = {name: (created_with or {})[name] for name in WRITE_MODE_SETTINGS if (created_with or {}).get(name)}
+    given.update({name: read[name]["value"] for name in _JOB_SETTINGS if read.get(name, {}).get("value") is not None})
     database_groups: Dict[tuple, List[str]] = {}
     server_groups: Dict[str, set] = {}
     tables_by_group: Dict[str, Dict[str, int]] = {}
@@ -384,12 +395,12 @@ def job_inputs(job_name: str, job_rows: List[dict], groups_per_server: placement
 
 def plan_for_job(job_name: str, text: str, load_type: str, job_rows: List[dict],
                  groups_per_server: Optional[int] = None, taken_groups: Optional[set] = None,
-                 unity_catalog: bool = False) -> dict:
+                 unity_catalog: bool = False, created_with: Optional[dict] = None) -> dict:
     """What importing a CSV of tables into an existing job writes, as plan() does for a new one, plus "new_groups".
     Each table takes the job's settings. A database already in the job keeps its group; a new database on one of the
     job's servers joins one of that server's groups by a stable hash of its name, as Add databases does; a new server
     gets groups_per_server new groups. A table the job already writes is left as it is (in_job)."""
-    inputs = job_inputs(job_name, job_rows, groups_per_server, unity_catalog)
+    inputs = job_inputs(job_name, job_rows, groups_per_server, unity_catalog, created_with)
     if inputs["errors"]:
         return {"errors": inputs["errors"], "lines": [], "groups": [], "new_groups": [], "settings": {}}
     given = {**inputs["given"], "load_type": load_type}

@@ -187,6 +187,15 @@ The step's top line counts the choice: databases chosen of those listed, then th
 count and the access checks go on out of sight, with nothing spinning); the same numbers end the step's last line and
 the job's Chosen summary.
 
+**How a new job writes, unless you change it.** Fan-in **Yes: shared tables** and Change-tracked tables **Append:
+change log**: every database writes its rows into shared target tables, as change logs (one row per change, with
+`__change_op` and `__change_version`; see [Append sinks](../docs/how-it-works.md#append-sinks-optional)). That is the
+fastest set-up, as the engine puts several databases' copies of a table in one Delta commit. Full-reload tables still
+merge. **Merge: current state** and **No: own tables** are one choice away. An existing job keeps what it was made
+with: Edit shows its own values, and Add tables and Add databases write new tables the way its tables are written (a
+write mode none of its tables has yet, as for change-tracked tables added to a job of full reloads, is the one Create
+was asked for, or merge for a job made before the app kept that record).
+
 **Keys and identity columns of a new fan-in job.** Each row's `__client_id__` is the server and database joined by an
 underscore (`{server}_{database}`): the UC connection name, or host and port, in lower case, then the database name.
 Each row also gets `source_server` and `source_database`, which the New job form shows and lets you remove. Add tables
