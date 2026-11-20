@@ -5,6 +5,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, qs, type Row } from "../api";
 import { Cols, Crumbs, ConfirmButton, Cut, ErrorBox, Info, Menu, Notice, PageHead, Pager, Section, StateBar, fmtInt, oneLine, plural, useConfirm, Twisty,
          Busy, Chevron, OutLink, Required, StatusLine, WriteWarnings, toast } from "../components";
+import { confirmingShared } from "../sharedSources";
 import { usePermissions } from "../permissions";
 import { CADENCES, IdentityFields, ParameterField, ParameterFields, RunFields, WritesFields } from "./jobForm";
 import { ImportCsvDialog } from "./NewJob";
@@ -62,7 +63,9 @@ function TableRows({ jobId, server, database, locked, readOnly }: { jobId: strin
         body: <><p>It becomes {LOAD_TYPES[load_type] ?? load_type} in all {fmtInt(preview.changed)} {plural(preview.changed, "table")} of
           this name in the job's databases.</p>
           {Number(preview.reseed) > 0 && <p>The next run loads {fmtInt(preview.reseed)} of them again from their sources.</p>}</> });
-      return ok ? api.post<Row>(`/ingestion-jobs/${jobId}/tables/edit`, { ...body, dry_run: false }) : null;
+      // A key or column edit may move tables into a database another job reads: asked as Create asks.
+      return ok ? confirmingShared(confirm.ask, (confirmShared) => api.post<Row>(`/ingestion-jobs/${jobId}/tables/edit`,
+        { ...body, dry_run: false, ...(confirmShared ? { confirm_shared: true } : {}) })) : null;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["job-tree", jobId] }),
   });
@@ -206,6 +209,7 @@ function AddDatabases({ jobId, servers }: { jobId: string; servers: string[] }) 
   const [preview, setPreview] = useState<Row | null>(null);
   const [checked, setChecked] = useState<Row | null>(null);
   const qc = useQueryClient();
+  const confirm = useConfirm();
   const body = (dry_run: boolean): Row => ({
     databases: names.split(/[\n,]+/).map((n) => n.trim()).filter(Boolean).map((database) => ({ server, database })),
     full_list: false, dry_run });
@@ -218,7 +222,10 @@ function AddDatabases({ jobId, servers }: { jobId: string; servers: string[] }) 
   const [task, setTask] = useState<Row | null>(null);
   // One request id per checked request: applying it again (a retry after a timeout) finds the same task.
   const apply = useMutation({
-    mutationFn: async () => finished(await api.post<Row>(`/ingestion-jobs/${jobId}/databases`, checked!), setTask),
+    // A database another live job reads is asked about before anything is written, so the same request id goes again.
+    mutationFn: async () => finished(await confirmingShared(confirm.ask, (confirmShared) =>
+      api.post<Row>(`/ingestion-jobs/${jobId}/databases`, confirmShared ? { ...checked!, confirm_shared: true } : checked!)),
+    setTask),
     onSuccess: (r) => {
       setPreview(r.summary); qc.invalidateQueries({ queryKey: ["job-tree", jobId] });
       toast(`Added ${fmtInt(r.summary.new_tables)} ${plural(r.summary.new_tables, "table")}`);
@@ -227,6 +234,7 @@ function AddDatabases({ jobId, servers }: { jobId: string; servers: string[] }) 
   const note = requestWriteNotice("Adding databases", { pending: apply.isPending && !task, error: apply.error });
   return (
     <div className="add-databases">
+      {confirm.dialog}
       <div className="form-grid">
         <label><span>Server<Required /><Info label="About the server">A UC connection, or one of the job's servers. Each database
           gets every table of the job, with the job's target names and identity columns filled in.</Info></span>
@@ -280,7 +288,9 @@ function useAddTables(jobId: string) {
     setSent(body);
     setWriting(true);
     try {
-      return await finished(await api.post<Row>(`/ingestion-jobs/${jobId}/tables`, { ...body, dry_run: false }), setTask);
+      return await finished(await confirmingShared(confirm.ask, (confirmShared) => api.post<Row>(
+        `/ingestion-jobs/${jobId}/tables`, { ...body, dry_run: false, ...(confirmShared ? { confirm_shared: true } : {}) })),
+      setTask);
     } finally {
       setWriting(false);
     }

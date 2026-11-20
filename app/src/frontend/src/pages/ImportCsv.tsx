@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Row } from "../api";
 import { Cols, ConfirmButton, Cut, CutCopy, ErrorBox, PageHead, Section, Tag, ToastOn, WriteWarnings, fmtInt, oneLine, plural } from "../components";
+import { useSharedConfirm } from "../sharedSources";
 import { groupsRefusal, usePermissions } from "../permissions";
 
 /** The preview's lines as a job's runs list keeps its columns: the problems take the spare width. */
@@ -48,8 +49,11 @@ export default function ImportCsv() {
       return api.post<Row>("/import", request);
     },
   });
+  // Lines of a database another live job reads are asked about first, as Create asks.
+  const askShared = useSharedConfirm();
   const apply = useMutation({
-    mutationFn: () => api.post<Row>("/import", { ...previewed, dry_run: false }),
+    mutationFn: () => askShared.send((confirmShared) => api.post<Row>("/import",
+      { ...previewed, dry_run: false, ...(confirmShared ? { confirm_shared: true } : {}) })),
     onSuccess: () => { qc.invalidateQueries(); preview.reset(); },
   });
   const changed = () => { preview.reset(); apply.reset(); setPreviewed(null); };
@@ -61,6 +65,7 @@ export default function ImportCsv() {
   const isNew = settings.data && !settings.data.tables;
   return (
     <>
+      {askShared.dialog}
       <PageHead title="Import a CSV of tables"
         lead={<>Each line says where a table is; the ingestion group's settings say how to ingest it. Columns:
           src_connection (or src_host and secret_key), src_database, src_schema, src_table, select_list, primary_key,

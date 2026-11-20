@@ -1,7 +1,8 @@
 """A deleted job's Restore and its refusals against a real Postgres: the restore statements
 (queries.restore_members_sql,
 restore_schedule_sql), the checks
-a Restore makes (live_name_taken_sql, groups_held_elsewhere_sql, restore_conflicts_sql),
+a Restore makes (live_name_taken_sql, groups_held_elsewhere_sql, restore_conflicts_sql; its shared-database
+check is shared_sources_pg_test.py's),
 the owner of a new table's database (deleted_database_owners_sql), and the Deleted jobs list (deleted_jobs_sql,
 deleted_jobs_count_sql, deleted_groups_sql). The fixture and the control row come from delete_job_pg_test.
 
@@ -68,13 +69,14 @@ def test_a_group_a_live_job_holds_is_named_and_refuses_the_restore(pg):
     assert pg.execute(q.groups_held_elsewhere_sql(), (["g1", "g2"], sid)).fetchall() == [("g1", "Holder")]
 
 
-def test_a_live_job_sharing_a_database_or_a_target_table_refuses_the_restore(pg):
+def test_a_live_job_writing_one_of_its_target_tables_refuses_the_restore_and_a_shared_database_alone_does_not(pg):
     _deleted(pg, "Hourly", ["g1"])
     _row(pg, "g1", "a")                                       # database db, sink m.l.g1_a
     _job(pg, "Other", ["g9"])
-    _row(pg, "g9", "x", sink="g1_a", client="c9")             # the same database and the same sink table
-    assert pg.execute(q.restore_conflicts_sql(), (["g1"], ["g1"])).fetchall() == [
-        ("database", "db", "Other"), ("target", "m.l.g1_a", "Other")]
+    _row(pg, "g9", "y")                                       # the same database, another sink table
+    assert pg.execute(q.restore_conflicts_sql(), (["g1"],)).fetchall() == []
+    _row(pg, "g9", "x", sink="g1_a", client="c9")             # and now the same sink table
+    assert pg.execute(q.restore_conflicts_sql(), (["g1"],)).fetchall() == [("m.l.g1_a", "Other")]
 
 
 def test_a_new_table_in_a_database_a_kept_job_still_reads_is_refused_as_its_owner(pg):

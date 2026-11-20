@@ -12,6 +12,7 @@ import { TaskProgress, finished, newRequestId, resumableWrite } from "./tasks";
 import { draftCreateBlock, draftReadProgress, isUnconfirmed, requestWriteNotice } from "../pending";
 import { ChosenDatabases } from "./ChosenTree";
 import { defaultJobName, nameTaken } from "../jobName";
+import { SharedNotice, type SharedVerdict, confirmingShared, shareQuestion } from "../sharedSources";
 
 // New ingestion job: the Edit view, empty, with Create in place of Save. Its tables are added in What it ingests
 // (Add tables: a CSV uploaded once, or a discovery), the rest is set as in Edit, and nothing is written until Create,
@@ -121,10 +122,16 @@ export default function NewJob() {
     // read as they were chosen: asked again until they are (each preview also does a step of the draft's read).
     refetchInterval: (query) => (query.state.data?.discovering ? 3000 : query.state.data?.reading?.pending ? 2000 : false),
   });
+  const confirm = useConfirm();
   // The body is the variables, so a Create that stopped part way is finished by sending the same body again.
   const create = useMutation({
     // Once sent, the Create takes the drafts (it waits for their reads, on the server), so leaving no longer discards them.
-    mutationFn: async (sent: Row) => { created.current = true; setTask(null); return finished(await api.post<Row>("/ingestion-jobs", sent), setTask); },
+    // A database another job reads is confirmed first (createJob); one the preview hadn't listed yet is asked here.
+    mutationFn: async (sent: Row) => {
+      created.current = true; setTask(null);
+      return finished(await confirmingShared(confirm.ask, (confirmShared) =>
+        api.post<Row>("/ingestion-jobs", confirmShared ? { ...sent, confirm_shared: true } : sent)), setTask);
+    },
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["ingestion-jobs"] }); qc.invalidateQueries({ queryKey: ["schedules"] });
       // The job's page as soon as Create names the job: written already, or recorded and preparing, which its page follows.
@@ -139,6 +146,7 @@ export default function NewJob() {
   const summary: Row | undefined = preview.data?.summary;
   const discoveringDatabases: number | null = preview.data?.discovering ? Number(preview.data.databases) : null;
   const reading = preview.data?.reading ?? null;
+  const shared: SharedVerdict | null = preview.data?.shared ?? null;
   const readProgress = draftReadProgress(reading);
   const [openServer, setOpenServer] = useState<string | null>(null);
   // A default name another job's groups already use (made the same second) is made again; a typed one is said taken.
@@ -149,15 +157,21 @@ export default function NewJob() {
   const blocked = !name.trim() ? "Name the job first" : !chosen ? "Add its tables first"
     : discoveringDatabases !== null ? "Reading tables"
     : (preview.isFetching && preview.data === undefined) || preview.isPlaceholderData || settled !== current ? "Checking the tables"
-    : preview.error ? "Fix what the check found first" : draftCreateBlock(reading)
+    : preview.error || shared?.refused?.length ? "Fix what the check found first" : draftCreateBlock(reading)
     ?? (summary?.invalid?.length ? "Fix the invalid lines first" : targetBlock(w));
-  const confirm = useConfirm();
   // As Databricks asks before a bulk delete: removing many tables is confirmed, a few go at once.
   const removeTables = () => {
     const tables = Number(summary?.tables ?? 0);
     if (tables < REMOVE_CONFIRM_TABLES) return setChosen(null);
     confirm.ask({ title: `Remove ${fmtInt(tables)} ${plural(tables, "table")}?`, action: "Remove", danger: true,
                   body: "They leave this new job. Add tables chooses them again." }).then((ok) => ok && setChosen(null));
+  };
+  // A job that reads databases another live job reads (into another catalog or schema) is confirmed before it is
+  // made, as the preview lists them; the Create then says so (confirm_shared), so the server asks nothing more.
+  const createJob = () => {
+    const shares = shared?.shares ?? [];
+    if (!shares.length) return create.mutate(body(false));
+    confirm.ask(shareQuestion(shares, "Create")).then((ok) => ok && create.mutate({ ...body(false), confirm_shared: true }));
   };
   const cancel = () => {
     if ((!name || name === defaultName) && !chosen) return navigate("/ingestion-jobs");
@@ -186,7 +200,7 @@ export default function NewJob() {
         right={<span className="card-actions">
           <button onClick={cancel} disabled={create.isPending}>Cancel</button>
           <button className="primary" disabled={!!blocked || create.isPending} title={blocked ?? undefined}
-            onClick={() => create.mutate(body(false))}>{create.isPending ? "Creating…" : "Create"}</button></span>} />
+            onClick={createJob}>{create.isPending ? "Creating…" : "Create"}</button></span>} />
       {confirm.dialog}
       <StatusLine line={note} />
       {create.isPending && <TaskProgress task={task} />}
@@ -232,6 +246,7 @@ export default function NewJob() {
                 added:<ul>{summary!.invalid.slice(0, 20).map((l: Row) => <li key={l.line}>line {l.line}, {l.table}: {l.errors.join("; ")}</li>)}</ul>
                 {summary!.invalid.length > 20 && <span className="muted">and {fmtInt(summary!.invalid.length - 20)} more.</span>}</Notice>}
               <ErrorBox error={preview.error} />
+              <SharedNotice verdict={shared} />
             </>
           )}
         </Section>

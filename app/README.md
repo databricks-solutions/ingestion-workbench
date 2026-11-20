@@ -105,9 +105,11 @@ runs as the deployer. A Delete takes two steps: the app marks the job deleted, a
 - The job is **kept** under **Deleted jobs** for `DELETED_JOB_RETENTION_DAYS` (default 7; the bundle variable
   `deleted_job_retention_days`, which the engine bundle's purge reads too, so both must match), with the days left.
 - **Restore** brings it back paused, with the members its Delete removed (members removed earlier stay removed). It is
-  refused (409) when its name is taken, when one of its groups is now in another live job, when a live job reads or
-  writes the same database or target table, or when its purge has started or finished. Its tables and state are as
-  they were, since nothing was purged.
+  refused (409) when its name is taken, when one of its groups is now in another live job, when a live job writes the
+  same target table, when a live job reads one of its databases and writes to one of its target catalog and schema
+  pairs (see A database in two jobs, under A new job's preparation), or when its purge has started or finished. A
+  live job that reads one of its databases into another catalog or schema is no reason to refuse: Restore asks to
+  confirm it first. Its tables and state are as they were, since nothing was purged.
 - **Delete now** (`POST /api/schedules/{id}/purge`) starts the delete job at once. The daily run (03:00 UTC) purges
   every deleted job whose retention has run out. Each purge deletes the groups' control, checkpoint, reseed_queue,
   database_check, check_work and rollup rows, and the job's job_selection rows, in one transaction under their run
@@ -378,7 +380,8 @@ lightest group takes the biggest part, so the groups end as level as the rule al
 level takes no part. Databases are placed biggest first. A database can also be split by hand: an edit, an
 add or a registration that leaves one database's tables in more than one group is written, and its answer warns once,
 naming the database, its groups and the live jobs holding them. A later write to a database that is split already says
-nothing; the job page's tree marks every split database. A split
+nothing; the job page's tree marks every split database. A database in two jobs' groups counts as split too (see A
+database in two jobs). A split
 database loads correctly (each group checks it for changes to its own tables and loads only those;
 `tests/split_database_test.py`), but each extra group adds its own change queries on the database's server every
 cycle, and its group runs open more connections to that server at the same time. Nothing already placed moves when a
@@ -389,10 +392,46 @@ or fewer, writes every table before it answers, as before, and the job is Ready 
 still being read, a database that couldn't be read, more than 5,000 tables, or a file with database-only lines)
 records the job at once and answers with its id; the page opens the job. Before it answers it checks what needs only
 names and settings: the job's name, the target templates, that the group names it would make are free, that no chosen
-database is already in another job, live or deleted, by its key, the source and scope rules, the right to run what it
-starts when the schedule is to be on, and, for database-only lines, the right to run discovery. Then one transaction
+database is in a deleted job kept for a Restore, by its key, that a chosen database another live job reads keeps to
+the rule below (A database in two jobs), the source and scope rules, the right to run what it starts when the
+schedule is to be on, and, for database-only lines, the right to run discovery. Then one transaction
 writes the job (paused, no groups yet), its record (Preparing), what it was chosen from with its drafts claimed, and its
 prepare task. `PREPARE_CREATES=0` keeps the earlier Create, which waits for the read and the write in a task of its own.
+
+**A database in two jobs.** One source database may be read by a second live ingestion job only when the two jobs
+write to different targets: no catalog and schema pair that one job's tables write to is one the other job's tables
+write to (compared without case, as Unity Catalog does). Each job then reads it on its own schedule, with its own
+groups, checkpoints and first loads: the second job's tables start from nothing, each with a first load, and the first
+job is not touched. The source is read once more for each job, and a failing source table shows in both jobs.
+- **The same database** is the same server and the same database name. A table read by host is at its host and port
+  (the source type's default port when it names none); a table read through a Unity Catalog connection is at the host
+  and port the connection names, so two connections to one server, or a connection and a host, are one server. The
+  login is no part of it. The app lists the connections it can see at most every `CONNECTIONS_CACHE_SECONDS` (300 s),
+  and again sooner when a write names a connection the list lacks; one it can't see is a server of its own.
+- **Every write that gives a job a database another live job reads asks first**, as the Databricks UI asks before a
+  change with a cost: the page lists the databases, each with the job that reads it, linked, and writes only once
+  confirmed (the request's `confirm_shared`; without it the server answers 409 with the list and writes nothing). This
+  covers Create, Add tables, Add databases, Add a table, Import CSV, Bulk import's register, a table's edit, a group
+  added to a job's members, and Restore. A database the job reads already is not asked about again, and an edit that
+  changes neither where a table is read nor where it is written (a load type, a key) is not checked. Edit's target
+  catalog and schema settings add no database, so they ask nothing and only refuse a clash. Re-discovery runs on its
+  own and can't ask: a database another job reads joins under the job's own whole-server choice.
+- **A clash refuses the write** (409, naming the job, with a link), and nothing of it is written: a database whose
+  job writes to a catalog and schema this job writes to, or a catalog and schema new to this job that a job sharing
+  one of its databases writes. A Create checks before anything is written: its preview lists the clashes and the
+  databases it would share, and a refused Create makes no job. A target template that needs a table's schema or name is
+  known only when the tables are, so that database is checked as its tables are written: a prepared Create sets it
+  aside with why. A write of many transactions (Add tables or Create by database) checks all of its planned tables
+  before its first, and asks in the request, so it is refused or asked whole.
+- **Inside each write's transaction** the rule is checked again on what the write gives its job (a database or a
+  catalog and schema new to it), so a large job's write reads little more than before, under one lock for the check,
+  so two writes in two jobs never pass it on each other's rows before either commits. Two jobs that already shared a
+  database and a schema before this rule (an edit could make that with a warning) are not refused again by a write that
+  adds neither a database nor a schema to that pair. A write that keeps to the rule warns once that the database is
+  split over groups, as any split does.
+- **Restore** checks every table of the job's groups once they are live again: a clash refuses it, and a database a
+  live job reads into another catalog or schema asks to confirm.
+- A deleted job, a member its job removed, and a group both jobs hold (one read, not two) are not a second job here.
 
 **The prepare task** (an `app_task` of kind `prepare`, one per job) waits for the reads through the background reader,
 then writes the tables database by database, each database whole in its own transaction, then syncs the job's
@@ -428,7 +467,8 @@ two rules. Delete is as for any job.
 
 **A database set aside** is set aside whole, never part of it, and listed on the job page with why: it couldn't be read
 (the server's message), or its tables are refused at the write (a target another table already writes, two of the
-job's tables writing one target, a sink both dedicated and shared, a database a deleted job keeps). The rest are
+job's tables writing one target, a sink both dedicated and shared, a database a deleted job keeps, a database another
+live job reads into a catalog and schema this job also writes to). The rest are
 written. In a whole-server choice a database the login can't open is only left out, and listed. While any waits the job
 Needs you and isn't Ready. The job page offers, each needing Can Manage on the job, as Edit does:
 - **Read them again**: the unreadable ones' rows are reset in the same transaction, so the background reader reads them

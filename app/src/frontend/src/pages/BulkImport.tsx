@@ -6,6 +6,7 @@ import { api, type Row } from "../api";
 import { useSettings } from "../App";
 import { groupsRefusal, usePermissions } from "../permissions";
 import { Badge, Busy, Cols, ConfirmButton, Cut, ErrorBox, FillBox, ToastOn, Grid, Notice, PageHead, Section, Tag, WriteWarnings, autoColumns, fmtAgo, fmtInt, fmtTime, gridTheme, Host, oneLine, plural } from "../components";
+import { useSharedConfirm } from "../sharedSources";
 
 /** The tracked databases list as the Jobs list keeps its columns: the database takes the spare width. */
 const TRACKED_WIDTHS = [null, 260, 90, 130] as const;
@@ -207,8 +208,11 @@ export default function BulkImport() {
     edits: rows.map((r) => Object.fromEntries(["src_database", "src_schema", "src_table", ...EDITABLE].map((k) => [k, r[k]]))),
   });
   const validate = useMutation({ mutationFn: () => api.post(`/discoveries/${did}/register`, payload(true)) });
+  // Tables of a database another live job reads are asked about first, as Create asks.
+  const askShared = useSharedConfirm();
   const register = useMutation({
-    mutationFn: () => api.post(`/discoveries/${did}/register`, payload(false)),
+    mutationFn: () => askShared.send((confirmShared) => api.post(`/discoveries/${did}/register`,
+      { ...payload(false), ...(confirmShared ? { confirm_shared: true } : {}) })),
     // Registering changes what lakefed tracks on the connection, so its card and database list refresh too.
     onSuccess: () => {
       for (const key of ["review", "collections", "connections", "connection-databases", "overview", "tables"]) {
@@ -225,6 +229,7 @@ export default function BulkImport() {
   return (
     <>
       {head}
+      {askShared.dialog}
       <Connections picked={picked} onPick={setPicked} />
       <DiscoverForm prefill={picked} onStarted={(id, runId) => {
         setDiscoveryId(id); setStartedRun({ did: id, runId }); qc.invalidateQueries({ queryKey: ["discoveries"] });

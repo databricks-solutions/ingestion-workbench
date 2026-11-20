@@ -20,6 +20,7 @@ pytest.importorskip("fastapi")
 import main  # noqa: E402
 import preparing as p  # noqa: E402
 import queries as q  # noqa: E402
+import shared_databases as sb  # noqa: E402
 
 URI = os.environ.get("LAKEFED_APP_TEST_PG")
 pytestmark = pytest.mark.skipif(not URI, reason="LAKEFED_APP_TEST_PG not set")
@@ -287,13 +288,17 @@ def test_create_finds_a_database_another_job_holds_by_its_key_alone(owner):
     owner.execute("update lakefed_ingest.schedule set deleted_at = now() where id = any(%s)", ([gone, purged],))
     owner.execute("update lakefed_ingest.schedule_member set removed_at = now() where schedule_id = any(%s)",
                   ([gone, purged],))
-    key = lambda database: q.database_key({"src_type": "sqlserver", "src_host": "h", "src_port": 1433,
-                                            "secret_key": "k1", "src_database": database})
-    found = owner.execute(q.database_owners_sql(), ([key("eng_1")],)).fetchall()
-    assert [(r[0], r[2]) for r in found] == [("eng_1", False)]
-    assert [(r[0], r[2]) for r in owner.execute(q.database_owners_sql(), ([key("eng_2")],)).fetchall()] == [
-        ("eng_2", True)]
-    assert owner.execute(q.database_owners_sql(), ([key("eng_3"), key("eng_9")],)).fetchall() == []
+    source = lambda database: {"src_type": "sqlserver", "src_host": "h", "src_port": 1433, "secret_key": "k1",
+                               "src_database": database}
+    server = lambda *databases: {"keys": [sb.server_key(source(database), {}) for database in databases],
+                                 "ep_names": [], "ep_servers": []}
+    key = lambda database: q.database_key(source(database))
+    found = owner.execute(q.live_database_owners_sql(), server("eng_1", "eng_2", "eng_3")).fetchall()
+    assert [(r[0], r[1], r[2]) for r in found] == [(sb.server_key(source("eng_1"), {}), "eng_1", live)]
+    assert [(r[0], r[2]) for r in owner.execute(q.deleted_database_owners_sql(),
+                                                ([key("eng_1"), key("eng_2"), key("eng_3")],)).fetchall()] == [
+        ("eng_2", gone)]
+    assert owner.execute(q.live_database_owners_sql(), server("eng_9")).fetchall() == []
 
 
 def test_a_pass_finds_the_databases_the_job_has_written_with_their_groups(owner):

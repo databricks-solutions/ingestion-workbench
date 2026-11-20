@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Row } from "../api";
 import { Badge, ConfirmButton, ErrorBox, Grid, Notice, WriteWarnings, autoColumns, fmtTime, plural } from "../components";
+import { useSharedConfirm } from "../sharedSources";
 
 // Every edit runs through the server's plan first (preview): what changes, which tables reseed and
 // why, warnings, and validation errors. Apply is only offered for a clean preview of the same edit.
@@ -53,16 +54,21 @@ function useEdit(ids: number[], onDone: () => void) {
   const qc = useQueryClient();
   const [preview, setPreview] = useState<PlanResult | null>(null);
   const [previewKey, setPreviewKey] = useState("");
+  // An edit that points tables at a database another live job reads asks first, as Create does.
+  const shared = useSharedConfirm();
   const run = useMutation({
-    mutationFn: ({ changes, dry_run }: { changes: Row; dry_run: boolean }) =>
-      api.post<PlanResult>("/tables/edit", { ids, changes, dry_run }),
+    mutationFn: ({ changes, dry_run }: { changes: Row; dry_run: boolean }) => dry_run
+      ? api.post<PlanResult>("/tables/edit", { ids, changes, dry_run })
+      : shared.send((confirmShared) => api.post<PlanResult>("/tables/edit",
+        { ids, changes, dry_run, ...(confirmShared ? { confirm_shared: true } : {}) })),
     onSuccess: (r, v) => {
       setPreview(r);
       if (v.dry_run) setPreviewKey(JSON.stringify(v.changes));
       else { qc.invalidateQueries(); onDone(); }
     },
   });
-  return { preview, previewKey, run, reset: () => { setPreview(null); setPreviewKey(""); run.reset(); } };
+  return { preview, previewKey, run, dialog: shared.dialog,
+           reset: () => { setPreview(null); setPreviewKey(""); run.reset(); } };
 }
 
 function ApplyBar({ changes, edit }: { changes: Row; edit: ReturnType<typeof useEdit> }) {
@@ -71,6 +77,7 @@ function ApplyBar({ changes, edit }: { changes: Row; edit: ReturnType<typeof use
     && !edit.preview.summary.errors && edit.preview.summary.changed > 0;
   return (
     <div className="toolbar">
+      {edit.dialog}
       <button className="primary" disabled={!Object.keys(changes).length || edit.run.isPending}
         onClick={() => edit.run.mutate({ changes, dry_run: true })}>Preview changes</button>
       <ConfirmButton label="Apply" disabled={!ready}

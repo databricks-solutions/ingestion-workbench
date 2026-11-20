@@ -53,6 +53,7 @@ import run_poller
 import table_removal
 import schedules as sch
 import schema_upgrade
+import shared_databases as sb
 import source_catalog
 import warehouse
 import warehouse_reads
@@ -314,6 +315,213 @@ def _refuse_deleted_databases(cur, rows):
                                  f"it is purged: Restore {job}, or Delete now to purge it, then add these tables")
 
 
+# The Unity Catalog connections' servers, as the shared-database rule reads them (_connection_endpoints): listed again
+# after this many seconds, or sooner (at most every CONNECTIONS_RELIST_SECONDS) when a write names a connection the list
+# doesn't have, such as one made a moment ago.
+CONNECTIONS_CACHE_SECONDS = float(os.environ.get("CONNECTIONS_CACHE_SECONDS", "300"))
+CONNECTIONS_RELIST_SECONDS = 10.0
+_endpoints_cache: dict = {"at": 0.0, "map": {}}
+
+
+def _connection_endpoints(wanted: Iterable[str] = ()) -> Dict[str, str]:
+    """Each Unity Catalog connection the app can see, by lower-case name, with the server it names (host:port): how
+    the shared-database rule knows that two connections, or a connection and a host, reach one server. Listed at most
+    every CONNECTIONS_CACHE_SECONDS, and again sooner for a connection in wanted that the list lacks. A connection
+    whose options can't be read is left out, not the list; a listing that fails keeps the list as it was (empty at
+    first) and logs why. A connection not in the list is a server of its own (connection:<name>), as main reads it
+    everywhere else."""
+    now = time.monotonic()
+    age = now - _endpoints_cache["at"]
+    missing = any(name not in _endpoints_cache["map"] for name in wanted)
+    if _endpoints_cache["at"] and age < CONNECTIONS_CACHE_SECONDS and not (missing and age >= CONNECTIONS_RELIST_SECONDS):
+        return _endpoints_cache["map"]
+    try:
+        listed = _connections()
+    except Exception as e:
+        logging.getLogger(__name__).warning("shared-database rule: the connections could not be listed (%s); those not "
+                                            "listed before are each a server of their own", e)
+        _endpoints_cache["at"] = now
+        return _endpoints_cache["map"]
+    found = {}
+    for connection in listed:
+        try:
+            server = sb.server_of_connection(connection)
+        except Exception:
+            server = None
+        if server:
+            found[str(connection["name"]).strip(" ").lower()] = server
+    _endpoints_cache.update(at=now, map=found)
+    return found
+
+
+def _endpoint_params(endpoints: Dict[str, str]) -> dict:
+    """The named parameters queries.server_key_sql reads: the connections and their servers, in the same order."""
+    names = sorted(endpoints)
+    return {"ep_names": names, "ep_servers": [endpoints[name] for name in names]}
+
+
+def _shape_of(rows: Iterable[dict], into: Optional[dict] = None, endpoints: Optional[Dict[str, str]] = None) -> dict:
+    """The databases (shared_databases.server_key) and the targets (lower case catalog and schema pairs) some control
+    rows have, added to into when given: all the shared-database rule needs of a write's rows."""
+    into = into if into is not None else {"keys": set(), "targets": set()}
+    rows = list(rows)
+    endpoints = _connection_endpoints(sb.connections_named(rows)) if endpoints is None else endpoints
+    for row in rows:
+        if row.get("src_database"):
+            into["keys"].add(sb.server_key(row, endpoints))
+            into.setdefault("connections", set()).update(sb.connections_named([row]))
+        if row.get("sink_catalog") and row.get("sink_schema"):
+            into["targets"].add((str(row["sink_catalog"]).lower(), str(row["sink_schema"]).lower()))
+    return into
+
+
+def _shared_clashes(read, job_groups: List[str], jobs_: List[int], keys: List[str], targets: List[tuple],
+                    endpoints: Dict[str, str], ids: Iterable[int] = (), whole: bool = False,
+                    written: bool = True) -> sb.Verdict:
+    """The shared-database rule over what a write gives its job (the core of _refuse_shared_targets and
+    _refuse_shared_before): the clashes that refuse it, and the databases it newly shares with another live job, which
+    the user confirms. read(sql, params) answers rows as tuples. job_groups and jobs_ are the write's job, keys and
+    targets what its rows have; ids the rows written (whole: every row of the groups is). written says whether the rows
+    are in the Lakebase already, or only planned (then their targets and databases are compared in Python as well).
+
+    Only what is new to the job is looked at: a database another live job reads (then whether the two write to one
+    catalog.schema), and a catalog.schema another live job writes (then whether the two read one database). So a write
+    reads little, a database the job shared already is not asked about again, and a clash two jobs had before the rule
+    is not refused again by a write that adds nothing to it."""
+    endpoint_parameters = _endpoint_params(endpoints)
+    scope = {**endpoint_parameters, "groups": job_groups, "ids": sorted({int(i) for i in ids}), "whole": whole, "jobs": jobs_}
+    catalogs, schemas = [c for c, _ in targets], [s for _, s in targets]
+    verdict = sb.Verdict()
+    judged: Set[int] = set()
+    if keys:
+        for database, job_id, job in read(q.new_shared_databases_sql(), {**scope, "keys": keys}):
+            if job_id in judged:
+                continue
+            judged.add(job_id)
+            found = read(q.jobs_writing_targets_sql(), (catalogs, schemas, [job_id])) if not written and targets else []
+            target = found[0][1] if found else None
+            if target is None and job_groups:
+                found = read(q.common_target_sql(), (job_id, job_groups, job_groups))
+                target = found[0][0] if found else None
+            if target:
+                verdict.clashes.append(sb.Clash(database=database, job_id=job_id, job=job, target=target))
+            else:
+                verdict.shares.append(sb.Share(database=database, job_id=job_id, job=job))
+    if targets:
+        owners = None
+        for target, job_id, job in read(q.new_shared_targets_sql(), {**scope, "catalogs": catalogs, "schemas": schemas}):
+            if job_id in judged:
+                continue
+            judged.add(job_id)
+            database = None
+            if not written and keys:
+                owners = owners if owners is not None else read(q.live_database_owners_sql(),
+                                                                {**endpoint_parameters, "keys": keys})
+                database = next((found[1] for found in owners if found[2] == job_id), None)
+            if database is None and job_groups:
+                found = read(q.common_database_sql(), {**endpoint_parameters, "job": job_id, "groups": job_groups})
+                database = found[0][0] if found else None
+            if database:
+                verdict.clashes.append(sb.Clash(database=database, job_id=job_id, job=job, target=target))
+    return verdict
+
+
+def _refuse_shared_targets(cur, groups: Iterable[Optional[str]], rows: Optional[List[dict]] = None,
+                           ids: Iterable[int] = (), *, confirm_shared: bool) -> None:
+    """After a write's rows and members are in, in the same transaction: refuse (409) when the write leaves its job
+    sharing a source database with another live job that also writes to one of its catalog.schema targets
+    (shared_databases), and ask (409 with confirm_shared) when it gives its job a database another live job reads,
+    unless confirm_shared. rows are the rows written or edited, as they now are, and ids their ids; with no rows, every
+    row of the given groups counts as changed (a settings edit, a Restore, a group made a job's member). It takes the
+    rule's lock first (queries.shared_rule_lock_sql), so a write in another job waits rather than passing on rows not
+    yet committed."""
+    wanted = sorted({group for group in groups if group})
+    if not wanted:
+        return
+    cur.execute(q.job_groups_of_sql(), (wanted,))
+    members = cur.fetchall()
+    if not members:
+        return
+    endpoints = _connection_endpoints(sb.connections_named(rows or ()))      # a listing, if any, before the lock
+    cur.execute(q.shared_rule_lock_sql())
+    jobs_ = sorted({int(job_id) for job_id, _ in members})
+    job_groups = sorted({group for _, group in members})
+    if rows is None:
+        cur.execute(q.groups_keys_and_targets_sql(), {**_endpoint_params(endpoints), "groups": wanted})
+        found = cur.fetchall()
+        keys = sorted({first for kind, first, _ in found if kind == "database"})
+        targets = sorted({(first, second) for kind, first, second in found if kind == "target" and first and second})
+    else:
+        shape = _shape_of(rows, endpoints=endpoints)
+        keys, targets = sorted(shape["keys"]), sorted(shape["targets"])
+
+    def read(sql, params):
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+    _raise_for_shared(_shared_clashes(read, job_groups, jobs_, keys, targets, endpoints, ids, whole=rows is None),
+                      confirm_shared)
+
+
+def _refuse_shared_written(cur, written: List[tuple], *, confirm_shared: bool) -> None:
+    """_refuse_shared_targets over the (row, id) pairs a write inserted, once its groups are the job's members."""
+    rows = [row for row, _ in written]
+    _refuse_shared_targets(cur, {row.get("task_collection") for row in rows}, rows,
+                           [control_id for _, control_id in written], confirm_shared=confirm_shared)
+
+
+def _refuse_shared_before(job_id: Optional[int], shape: dict, *, confirm_shared: bool) -> None:
+    """Before a write records its task or writes its first transaction: the rule over all of its planned rows (their
+    _shape_of), so a clash refuses it whole and a share is asked in the request, where the page can answer (a write in
+    a background task could not ask). Each transaction still checks again (_refuse_shared_targets)."""
+    job_groups = sorted(_job_groups(job_id)) if job_id is not None else []
+    verdict = _shared_clashes(lambda sql, params: [tuple(row.values()) for row in db.query(sql, params)], job_groups,
+                              [int(job_id)] if job_id is not None else [], sorted(shape["keys"]),
+                              sorted(shape["targets"]), _connection_endpoints(shape.get("connections", ())),
+                              written=False)
+    _raise_for_shared(verdict, confirm_shared)
+
+
+def _shared_verdict(rows: List[dict], settings: Optional[dict] = None) -> sb.Verdict:
+    """The shared-database rule over a new job's databases before anything is written (a Create and its preview): the
+    live jobs that read any of them now, and whether this job's targets, all of them, meet that job's. rows are the
+    planned control rows, or with settings one row per chosen database (_chosen_databases), whose target the settings'
+    templates give (sb.planned_target). Only the planned targets are looked up in the other jobs' rows, so a preview
+    asked again and again reads little."""
+    endpoints = _connection_endpoints(sb.connections_named(rows))
+    keys, planned = set(), {}
+    for row in rows:
+        if not row.get("src_database"):
+            continue
+        key = sb.server_key(row, endpoints)
+        keys.add(key)
+        planned.setdefault(key, set()).add(sb.planned_target(settings, row) if settings is not None
+                                           else sb.target_of(row))
+    if not keys:
+        return sb.Verdict()
+    ordered, step, endpoint_parameters = sorted(keys), q.CONTROL_BATCH * 10, _endpoint_params(endpoints)
+    owners = [sb.Owner(key=found["key"], database=found["database"], job_id=int(found["job_id"]), job=found["job"])
+              for at in range(0, len(ordered), step)
+              for found in db.query(q.live_database_owners_sql(), {**endpoint_parameters, "keys": ordered[at:at + step]})]
+    known = sorted({target for targets in planned.values() for target in targets if target})
+    owner_targets: Dict[int, Set[str]] = {}
+    if owners and known:
+        pairs = [target.split(".", 1) for target in known]
+        for found in db.query(q.jobs_writing_targets_sql(), ([c for c, _ in pairs], [s for _, s in pairs],
+                                                            sorted({owner.job_id for owner in owners}))):
+            owner_targets.setdefault(int(found["job_id"]), set()).add(found["target"])
+    return sb.judge(owners, owner_targets, planned)
+
+
+def _raise_for_shared(verdict: sb.Verdict, confirm_shared: bool) -> None:
+    """A Create's answer to the rule before it writes: refused (409) for a clash, and asked to confirm (409 with
+    confirm_shared) for a database another live job reads, unless the request confirmed it."""
+    if verdict.clashes:
+        raise HTTPException(409, sb.refusal(verdict.clashes))
+    if verdict.shares and not confirm_shared:
+        raise HTTPException(409, sb.confirmation(verdict.shares))
+
+
 def _log(cur, user, action, control_id, collection, field=None, old=None, new=None, reseed=None, batch=None):
     as_text = lambda v: None if v is None else str(v)
     cur.execute(q.log_change_sql(), (user or None, action, control_id, collection, field, as_text(old),
@@ -426,7 +634,13 @@ def _rewrite_rollups_for_groups(cur, groups) -> None:
         _rewrite_rollups(cur, cur.fetchall())
 
 
-def _apply_plans(cur, rows, plans, user, batch) -> List[dict]:
+# The fields of a control row the shared-database rule reads: an edit of any other (a load type, a key) gives the job no
+# database and no target, so it is not checked.
+SHARED_RULE_FIELDS = {"task_collection", "src_type", "src_host", "src_port", "src_connection", "use_remote_query",
+                      "secret_key", "src_database", "sink_catalog", "sink_schema"}
+
+
+def _apply_plans(cur, rows, plans, user, batch, confirm_shared: bool = False) -> List[dict]:
     """Write planned edits (queries.plan_edit) inside the caller's transaction: each changed field, its change log
     line, a reseed where the plan needs one, then the mixed-sink check over the rows as they now are. Returns the
     split-database warnings for the rows as they now are (_split_database_warnings)."""
@@ -449,6 +663,9 @@ def _apply_plans(cur, rows, plans, user, batch) -> List[dict]:
             cur.execute(q.log_reseed_sql(), (f"edit:{p['reseed']}", [p["id"]]))
     _rewrite_rollups(cur, before + [(row["task_collection"], row.get("src_database")) for row in edited])
     _refuse_mixed_sinks(cur, edited)
+    changed = [row for row, p in zip(edited, plans) if set(p["changes"]) & SHARED_RULE_FIELDS]
+    _refuse_shared_targets(cur, {row["task_collection"] for row in changed}, changed, [row["id"] for row in changed],
+                           confirm_shared=confirm_shared)
     return _split_database_warnings(cur, edited, already_split)
 
 
@@ -2188,6 +2405,10 @@ def edit_ingestion_job_settings(job_id: int, body: JobSettingsRequest, request: 
             if mixed:
                 raise HTTPException(409, f"target {mixed[0]} would be claimed by a dedicated table and by others; "
                                          "a target is either one table's own or shared by client_id. Nothing was changed")
+            if result["changed"] and {"sink_catalog", "sink_schema"} & set(body.settings):
+                # A new catalog or schema may be one a job sharing a database writes; the databases are the job's
+                # already, so only a clash refuses.
+                _refuse_shared_targets(cur, groups, confirm_shared=True)
             found["summary"].update(changed=result["changed"], reseed=result["reseed"], applied=True)
             return found
     except psycopg.errors.UniqueViolation:
@@ -2464,6 +2685,8 @@ JOB_TABLE_FIELDS = ("load_type", "primary_key", "select_list", "cursor_column", 
 class JobTableEditRequest(JobScope):
     changes: dict
     dry_run: bool = True
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases).
+    confirm_shared: bool = False
 
 
 @app.post("/api/ingestion-jobs/{job_id}/tables/edit")
@@ -2489,13 +2712,15 @@ def edit_job_table(job_id: int, body: JobTableEditRequest, request: Request):
             cur.connection.rollback()
             return {"summary": summary, "plans": plans[:200]}
         _lock_collections(cur, [r["task_collection"] for r in rows])
-        warnings = _apply_plans(cur, rows, plans, _user(request), uuid.uuid4().hex[:12])
+        warnings = _apply_plans(cur, rows, plans, _user(request), uuid.uuid4().hex[:12], body.confirm_shared)
         _touch(cur, _user(request), [job_id])
         summary["applied"] = True
         return {"summary": summary, "plans": plans[:200], "warnings": warnings}
 
 
 class JobDatabasesRequest(BaseModel):
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases).
+    confirm_shared: bool = False
     csv: Optional[str] = None
     columns: dict = {"server": "server", "database": "database", "enabled": "enabled"}
     databases: Optional[List[dict]] = None
@@ -2549,6 +2774,7 @@ def add_job_databases(job_id: int, body: JobDatabasesRequest, request: Request):
     if body.dry_run:
         return {"summary": summary}
     _refuse_job_tables(job, groups + plan["new_groups"], request)
+    _refuse_shared_before(job_id, _shape_of(plan["new"]), confirm_shared=body.confirm_shared)    # asked here
     batch = uuid.uuid4().hex[:12]
 
     def write(progress, task_id):
@@ -2583,6 +2809,7 @@ def add_job_databases(job_id: int, body: JobDatabasesRequest, request: Request):
                                    int(job["cadence_minutes"]), bool(job.get("stagger")), sch.start_minute(job))
                 for g in plan["new_groups"]:
                     cur.execute(q.insert_member_sql(), (job_id, g, offs[g]))
+            _refuse_shared_written(cur, written, confirm_shared=body.confirm_shared)
             _touch(cur, user, [job_id])
             summary.update(applied=True, new_tables=len(written), skipped=len(plan["new"]) - len(written))
             result = {"summary": summary, "warnings": warnings}
@@ -2773,6 +3000,8 @@ class _TablesFrom(BaseModel):
 
 class JobTablesRequest(_TablesFrom):
     load_type: str = "ct"
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases).
+    confirm_shared: bool = False
     # Blank: each server's default for its tables (placement.groups_for_tables); a number: that many per server.
     groups_per_server: Optional[int] = Field(None, ge=1, le=nj.MAX_GROUPS_PER_SERVER)
     # The job's group size: each server gets one group for about this many of its tables (placement.TablesPerGroup).
@@ -2782,7 +3011,8 @@ class JobTablesRequest(_TablesFrom):
 
 
 def _write_planned_tables(cur, job: dict, plan: dict, user: str, batch: str, progress=None,
-                          skip_taken: bool = False, reader: Optional[str] = None) -> Tuple[List[tuple], List[dict]]:
+                          skip_taken: bool = False, reader: Optional[str] = None,
+                          confirm_shared: bool = False) -> Tuple[List[tuple], List[dict]]:
     """Inside the caller's transaction, with the job's groups locked: the plan's valid lines as control rows (each with
     its change log line), their groups' run locks, the mixed-sink check, and the job's new groups as members with
     offsets. Returns the (row, id) pairs written and the split-database warnings; skip_taken leaves out a row whose
@@ -2806,6 +3036,7 @@ def _write_planned_tables(cur, job: dict, plan: dict, user: str, batch: str, pro
                            int(job["cadence_minutes"]), bool(job.get("stagger")), sch.start_minute(job))
         for g in plan["new_groups"]:
             cur.execute(q.insert_member_sql(), (job_id, g, offs[g]))
+    _refuse_shared_written(cur, written, confirm_shared=confirm_shared)
     return written, warnings
 
 
@@ -2852,6 +3083,10 @@ def _add_job_tables(job_id: int, body: "JobTablesRequest", request: Request, inl
     job = _load_schedule(job_id)[0]
     if not inline and body.source is not None and not body.dry_run and _has_database_lines(body.source):
         _refuse_job_tables(job, _job_groups(job_id), request)
+        kind, param, _, _ = _selection_params(body.source)
+        # Asked here, from the file's databases, since the tables are found in the task, where no one can answer.
+        _refuse_shared_before(job_id, _shape_of(_chosen_databases(body.source, kind, param)),
+                              confirm_shared=body.confirm_shared)
         return _write_now_or_later("tables", body.request_id, job_id, 0, user,
                                    lambda progress, task_id: _add_after_discovery(job_id, body, request, progress, task_id),
                                    after, background=True)
@@ -2889,7 +3124,8 @@ def _add_job_tables(job_id: int, body: "JobTablesRequest", request: Request, inl
             summary = nj.summary(plan)
             if summary["invalid"]:
                 return {"summary": summary, "applied": False, "new_groups": []}
-            written, warnings = _write_planned_tables(cur, job, plan, user, batch, progress=progress)
+            written, warnings = _write_planned_tables(cur, job, plan, user, batch, progress=progress,
+                                                      confirm_shared=body.confirm_shared)
             if explicit:
                 cur.execute(q.clear_exclusions_sql(), (table_removal.line_keys(plan["lines"]), int(job_id)))
             _keep_selection(cur, job_id, selected, user)
@@ -2900,8 +3136,9 @@ def _add_job_tables(job_id: int, body: "JobTablesRequest", request: Request, inl
 
     if inline:
         return write(progress, task_id)
-    valid = sum(line["status"] == "valid" for line in plan["lines"])
-    return _write_now_or_later("tables", body.request_id, job_id, valid, user, write, after)
+    valid_rows = [line["row"] for line in plan["lines"] if line["status"] == "valid"]
+    _refuse_shared_before(job_id, _shape_of(valid_rows), confirm_shared=body.confirm_shared)    # asked here, not in a task
+    return _write_now_or_later("tables", body.request_id, job_id, len(valid_rows), user, write, after)
 
 
 def _add_after_discovery(job_id: int, body: "JobTablesRequest", request: Request, progress, task_id) -> dict:
@@ -3215,6 +3452,7 @@ def reseed(body: Ids, request: Request):
 
 @app.post("/api/tables")
 def add_table(row: dict, request: Request):
+    confirm_shared = q._truthy(row.pop("confirm_shared", False))
     _refuse_groups_outside_jobs([row.get("task_collection")])
     _refuse_groups([row.get("task_collection")], request)
     errs = q.validate_control_row(row)
@@ -3229,6 +3467,7 @@ def add_table(row: dict, request: Request):
         new_id = cur.fetchone()[0]
         _rewrite_rollups(cur, [(row.get("task_collection"), row.get("src_database"))])
         _refuse_mixed_sinks(cur, [row])
+        _refuse_shared_written(cur, [(row, new_id)], confirm_shared=confirm_shared)
         warnings = _split_database_warnings(cur, [row], already_split)
         _log(cur, _user(request), "add", new_id, row.get("task_collection"))
         _touch(cur, _user(request), groups=[row.get("task_collection")])
@@ -3249,6 +3488,8 @@ class EditRequest(BaseModel):
     ids: List[int] = Field(min_length=1)
     changes: dict = Field(min_length=1)
     dry_run: bool = True
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases).
+    confirm_shared: bool = False
 
 
 @app.post("/api/tables/edit")
@@ -3276,7 +3517,7 @@ def edit_tables(body: EditRequest, request: Request):
                 return {"summary": summary, "plans": plans}
             _recheck_locked_rows(rows, checked, request)
             _lock_collections(cur, [r["task_collection"] for r in rows] + ([new_coll] if new_coll else []))
-            warnings = _apply_plans(cur, rows, plans, _user(request), batch)
+            warnings = _apply_plans(cur, rows, plans, _user(request), batch, body.confirm_shared)
             _touch(cur, _user(request), groups=[r["task_collection"] for r in rows] + [new_coll])
             summary["applied"] = True
             return {"summary": summary, "plans": plans, "warnings": warnings}
@@ -4276,6 +4517,8 @@ class RegisterRequest(BaseModel):
     shared: Shared = Shared()
     edits: List[dict] = []
     dry_run: bool = False
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases).
+    confirm_shared: bool = False
 
 
 @app.post("/api/discoveries/{discovery_id}/register")
@@ -4323,6 +4566,9 @@ def register(discovery_id: str, body: RegisterRequest, request: Request):
                                 "errors": [] if res else ["sink already used by another control row"]})
             _rewrite_rollups(cur, [(row.get("task_collection"), row.get("src_database")) for _, row in valid])
             _refuse_mixed_sinks(cur, [row for _, row in valid])     # all or nothing, like an edit
+            _refuse_shared_written(cur, [(row, result["id"]) for (_, row), result
+                                         in zip(valid, results[-len(valid):]) if result["id"] is not None],
+                                   confirm_shared=body.confirm_shared)
             warnings = _split_database_warnings(cur, [row for _, row in valid], already_split)
             _touch(cur, _user(request), groups=[body.task_collection])
     else:
@@ -4340,6 +4586,8 @@ class ImportRequest(BaseModel):
     settings: dict = {}
     csv: str
     dry_run: bool = True
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases).
+    confirm_shared: bool = False
 
     @field_validator("task_collection")
     @classmethod
@@ -4403,6 +4651,8 @@ def import_csv(body: ImportRequest, request: Request):
             imported = [line["row"] for line in plan["lines"] if line["status"] == "imported"]
             _rewrite_rollups(cur, [(row.get("task_collection"), row.get("src_database")) for row in imported])
             _refuse_mixed_sinks(cur, imported)
+            _refuse_shared_written(cur, [(line["row"], line["id"]) for line in plan["lines"]
+                                         if line["status"] == "imported"], confirm_shared=body.confirm_shared)
             warnings = _split_database_warnings(cur, imported, already_split)
             _touch(cur, _user(request), groups=[group])
     return {"task_collection": group, "settings": plan["settings"], "counts": counted(plan["lines"]),
@@ -4438,6 +4688,8 @@ class ScheduleBody(BaseModel):
     options: dict = {}
     # At least one, checked by schedules.validate; a job that isn't Ready keeps its own (update_schedule).
     members: List[str] = []
+    # The user confirmed that a group added brings databases another live job reads (shared_databases).
+    confirm_shared: bool = False
 
     @field_validator("timezone")
     @classmethod
@@ -4700,6 +4952,7 @@ def create_schedule(body: ScheduleBody, request: Request):
                 cur.execute(q.insert_member_sql(), (sid, c, offs[c]))
                 _log(cur, user, "schedule_create", None, c, "schedule", None,
                      f"{body.name} ({sch.describe(body.cadence_minutes, offs[c], body.timezone)})", batch=batch)
+            _refuse_shared_targets(cur, body.members, confirm_shared=body.confirm_shared)
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, f"a schedule named '{body.name}' already exists")
     synced = _sync(sid, user)
@@ -4731,6 +4984,9 @@ class NewJobRequest(_TablesFrom):
     dry_run: bool = True
     # Made when the page opens the Create, so a retry of the same Create finds the task the first one made.
     request_id: Optional[str] = Field(None, max_length=80)
+    # The user confirmed reading databases another live job reads too, into other targets (shared_databases): a Create
+    # that would share one is refused until it is sent again with this set.
+    confirm_shared: bool = False
 
 
 def _source_columns(kind: str, param) -> List[str]:
@@ -4772,6 +5028,9 @@ class ChunkJob:
     # The checks of the rows each transaction writes, check(cur, rows), in place of _refuse_job_rows: a prepare task's
     # (_prepare_checks), which reads the job's maker and its connection again as they are then.
     check: Optional[object] = None
+    # Whether databases another live job reads were confirmed (shared_databases). Each caller says so: a Create and
+    # Add tables by database ask in the request, before their task, so their transactions refuse only a clash.
+    confirm_shared: bool = False
 
 
 def _schedule_create_line(job: ChunkJob, group: str) -> tuple:
@@ -4785,8 +5044,9 @@ def _write_chunk(cur, plans: List[dict], job: ChunkJob, state: dict) -> List[dic
     """The writes of one transaction, for the databases of a chunk (their plans), in the caller's transaction: each
     group's run lock once, the valid lines the chunk's databases do not have yet (a resumed write skips the rows a
     committed transaction wrote; a table the job already writes is left) with their change log lines in one statement,
-    the mixed-sink check once, the members its groups are missing, and the task's progress. The tables counted are the
-    valid lines reached, so a resumed write reports the whole. Returns the chunk's split-database warnings."""
+    the mixed-sink check once, the members its groups are missing, the shared-database rule (_refuse_shared_targets),
+    and the task's progress. The tables counted are the valid lines reached, so a resumed write reports the whole.
+    Returns the chunk's split-database warnings."""
     groups = sorted({group for plan in plans for group in plan["groups"]})
     _lock_collections_together(cur, groups)
     lines = [(line, line["row"]) for plan in plans for line in plan["lines"] if line["status"] == "valid"]
@@ -4805,17 +5065,19 @@ def _write_chunk(cur, plans: List[dict], job: ChunkJob, state: dict) -> List[dic
         else:
             _refuse_job_rows(todo, job.connection, job.user, cur=cur)
         already_split = _split_database_keys(cur, todo)
-        _insert_controls(cur, todo, job.user, job.batch, log_per_statement=by_database.TABLES_PER_TRANSACTION)
+        written = _insert_controls(cur, todo, job.user, job.batch,
+                                   log_per_statement=by_database.TABLES_PER_TRANSACTION)
         _refuse_mixed_sinks(cur, todo)
         warnings = _split_database_warnings(cur, todo, already_split)
     else:
-        warnings = []
+        written, warnings = [], []
     if groups:
         cur.execute(q.insert_members_if_absent_sql(),
                     (job.sid, groups, [job.offsets.get(group, 0) for group in groups]))
         created = sorted(found[0] for found in cur.fetchall())
         if job.log_members:
             _log_lines(cur, [_schedule_create_line(job, group) for group in created])
+    _refuse_shared_written(cur, written, confirm_shared=job.confirm_shared)
     state["databases_written"] += len(plans)
     state["tables_written"] += len(lines)
     state["seconds"] = job.stages.seconds()
@@ -4873,9 +5135,11 @@ def _create_by_database(body: NewJobRequest, request: Request, selection: Select
     if errors:
         raise HTTPException(422, {"errors": errors})
     summary = by_database.summary_of(name or PREVIEW_NAME, servers, settings["load_type"], groups_of)
+    sharing = _shared_verdict(_chosen_databases(selection, kind, param), settings)
     if body.dry_run:
         return {"summary": summary, "settings": settings, "created": False, "target_missing": _target_missing(settings),
-                "name_missing": not name}
+                "name_missing": not name, "shared": sharing.as_dict()}
+    _raise_for_shared(sharing, body.confirm_shared)
     if not run.paused:     # anyone may set up a job, but one that runs needs the right to run what it starts
         _refuse(_permission_refusals({"job_variant": run.job_variant}, user)["run"])
     options = _create_options(body)
@@ -4904,6 +5168,8 @@ def _create_by_database(body: NewJobRequest, request: Request, selection: Select
         with stages.timed("read"):
             return _rows_of_units(kind, param, chunk)
 
+    shape = {"keys": set(), "targets": set()}      # what the planned rows have, for the shared-database rule
+
     def check(own, stages, keep):
         """Every database planned, nothing written: the file's and the settings' problems, and the groups in use.
         Returns each database that has tables, in order, for the write to pack into transactions; each keeps its plan
@@ -4923,6 +5189,7 @@ def _create_by_database(body: NewJobRequest, request: Request, selection: Select
                 batch_rows += [line["row"] for line in plan["lines"] if line["status"] == "valid"]
                 counted.append(by_database.Checked(unit, len(rows), plan if keep else None))
             _refuse_job_rows(batch_rows, connection, user)
+            _shape_of(batch_rows, shape)
         if errors_found:
             raise HTTPException(422, {"errors": errors_found[:20] + (
                 [f"{len(errors_found)} lines cannot be taken"] if len(errors_found) > 20 else [])})
@@ -4938,6 +5205,9 @@ def _create_by_database(body: NewJobRequest, request: Request, selection: Select
         db.execute(q.task_progress_json_sql(), (json.dumps(state), 0, task_id))
         keep = by_database.keeps_plans(summary["tables"])
         counted = check(own, stages, keep)
+        # A target known only from the tables, before any job is made. The shares were asked in the request, from the
+        # chosen databases, so here only a clash refuses.
+        _refuse_shared_before(sid, shape, confirm_shared=True)
         stages.begin_write()
         state["stage"] = "writing"
         if sid is None:
@@ -4953,7 +5223,7 @@ def _create_by_database(body: NewJobRequest, request: Request, selection: Select
                     cur.execute(q.task_job_sql(), (sid, task_id))
             except psycopg.errors.UniqueViolation:
                 raise HTTPException(409, f"an ingestion job named '{name}' already exists")
-        job = ChunkJob(sid=sid, name=name, user=user, batch=batch, cadence_minutes=run.cadence_minutes,
+        job = ChunkJob(sid=sid, name=name, user=user, batch=batch, cadence_minutes=run.cadence_minutes, confirm_shared=True,
                        timezone=timezone_, offsets=offs, task_id=task_id, stages=stages, connection=connection)
         warnings: List[dict] = []
         for chunk in by_database.transactions_of(counted):
@@ -4994,6 +5264,11 @@ def _add_by_database(job_id: int, body: "JobTablesRequest", request: Request, ki
     excluded = table_removal.exclusions_of(sch.options_of(job))
     groups = _job_groups(job_id)
     _refuse_job_tables(job, groups, request)
+    if not body.dry_run:
+        # Asked in the request, from the chosen databases alone (the tables are read in the task): a database another
+        # live job reads, and that job's targets against the job's own. The task checks the tables' targets again.
+        _refuse_shared_before(job_id, _shape_of(_chosen_databases(selection, kind, param)),
+                              confirm_shared=body.confirm_shared)
     connection = _job_connection_row(job_id)
     inputs = nj.job_inputs(job["name"], db.query(q.groups_control_rows_sql(), (groups,)) if groups else [],
                            _sizing(body, job), unity_catalog=_unity_catalog(job))
@@ -5043,6 +5318,8 @@ def _add_by_database(job_id: int, body: "JobTablesRequest", request: Request, ki
                 plans.append(plan_of(kept, stages))
         return plans
 
+    shape = {"keys": set(), "targets": set()}      # what the planned rows have, for the shared-database rule
+
     def check(stages, keep):
         """Every database planned, nothing written: the lines that cannot be taken, and the groups the job would add.
         Returns those totals, and each database with its table count, in order, for the write to pack into
@@ -5069,6 +5346,7 @@ def _add_by_database(job_id: int, body: "JobTablesRequest", request: Request, ki
                 new_groups |= set(plan["groups"]) - set(groups)
                 counted.append(by_database.Checked(unit, len(rows), plan if keep else None))
             _refuse_job_rows(batch_rows, connection, user)
+            _shape_of(batch_rows, shape)
         if invalid:
             raise HTTPException(422, {"errors": invalid[:20] + (
                 [f"{len(invalid)} lines cannot be taken"] if len(invalid) > 20 else [])})
@@ -5081,6 +5359,8 @@ def _add_by_database(job_id: int, body: "JobTablesRequest", request: Request, ki
         db.execute(q.task_progress_json_sql(), (json.dumps(state), 0, task_id))
         keep = by_database.keeps_plans(total)
         found, counted = check(stages, keep)
+        # Refused whole, before its first transaction; the shares were asked in the request, so only a clash refuses.
+        _refuse_shared_before(job_id, shape, confirm_shared=True)
         stages.begin_write()
         active = [m for m in _load_schedule(job_id)[1] if m["removed_at"] is None]
         offs = sch.offsets([m["task_collection"] for m in active] + found["new_groups"], int(job["cadence_minutes"]),
@@ -5088,7 +5368,8 @@ def _add_by_database(job_id: int, body: "JobTablesRequest", request: Request, ki
         state["stage"] = "writing"
         chunk_job = ChunkJob(sid=job_id, name=job["name"], user=user, batch=batch,
                              cadence_minutes=int(job["cadence_minutes"]), timezone=job["timezone"], offsets=offs,
-                             task_id=task_id, stages=stages, log_members=False, connection=connection)
+                             task_id=task_id, stages=stages, log_members=False, connection=connection,
+                             confirm_shared=True)
         warnings: List[dict] = []
         for chunk in by_database.transactions_of(counted):
             plans = ([checked.plan for checked in chunk] if keep
@@ -5296,9 +5577,12 @@ def _create_job(body: NewJobRequest, request: Request, inline: bool = False, pro
 
     plan = planned()
     summary = nj.summary(plan)
+    sharing = _shared_verdict([line["row"] for line in plan["lines"] if line["status"] == "valid"])
     if body.dry_run or summary["invalid"]:
         return {"summary": summary, "settings": plan["settings"], "created": False,
-                "target_missing": _target_missing(plan["settings"]), "name_missing": not name}
+                "target_missing": _target_missing(plan["settings"]), "name_missing": not name,
+                "shared": sharing.as_dict()}
+    _raise_for_shared(sharing, body.confirm_shared)
     if not run.paused:     # anyone may set up a job, but one that runs needs the right to run what it starts
         _refuse(_permission_refusals({"job_variant": run.job_variant}, user)["run"])
     _refuse_job_rows([line["row"] for line in plan["lines"]], connection, user)
@@ -5319,11 +5603,12 @@ def _create_job(body: NewJobRequest, request: Request, inline: bool = False, pro
                                                       run.notify_emails or None, json.dumps(stored), user or None))
                 sid = cur.fetchone()[0]
                 already_split = _split_database_keys(cur, rows)
-                _insert_controls(cur, rows, user, batch, progress=progress)
+                written = _insert_controls(cur, rows, user, batch, progress=progress)
                 _refuse_mixed_sinks(cur, rows)
                 warnings = _split_database_warnings(cur, rows, already_split)
                 for group in plan["groups"]:
                     cur.execute(q.insert_member_sql(), (sid, group, offs[group]))
+                _refuse_shared_written(cur, written, confirm_shared=body.confirm_shared)
                 _log_lines(cur, [(user, "schedule_create", None, group, "schedule", None,
                                   f"{name} ({sch.describe(run.cadence_minutes, offs[group], timezone_)})", None, batch)
                                  for group in plan["groups"]])
@@ -5918,7 +6203,7 @@ def _chosen_databases(selection: Selection, kind: str, param) -> List[dict]:
                 if not (r.get("listing") or {}).get("dropped") and r.get("src_database")]
     else:
         rows = [{**{k: (r.get("fields") or {}).get(k) for k in ("src_type", "src_connection", "src_host", "src_port",
-                                                                "secret_key")},
+                                                                "secret_key", "use_remote_query")},
                  "src_database": r["src_database"], "server": r["server"]}
                 for r in db.query(q.upload_database_sources_sql(), (param,))]
     chosen, seen = [], set()
@@ -5931,20 +6216,19 @@ def _chosen_databases(selection: Selection, kind: str, param) -> List[dict]:
     return chosen
 
 
-def _refuse_owned_databases(rows: List[dict]) -> None:
-    """Create's check, by database key alone, before any table is read: a database already in another job's groups,
-    live or deleted and not purged, refuses the Create, as the split and deleted-job checks would at the write."""
+def _refuse_owned_databases(rows: List[dict], settings: dict, confirm_shared: bool) -> None:
+    """Create's check, by database key alone, before any table is read: a database a deleted job keeps (not purged)
+    refuses the Create, as the deleted-job check would at the write; a database a live job reads is judged by the
+    shared-database rule from the job's settings (_shared_verdict): refused when the targets meet that job's, else
+    asked to confirm. A target that needs a table's schema or name is checked at the write instead."""
     keys = sorted({q.database_key(row) for row in rows})
     for at in range(0, len(keys), q.CONTROL_BATCH * 10):
-        found = db.query(q.database_owners_sql(), (keys[at:at + q.CONTROL_BATCH * 10],))
-        if not found:
-            continue
-        database, job, deleted = found[0]["database"], found[0]["job"], found[0]["deleted"]
-        if deleted:
+        found = db.query(q.deleted_database_owners_sql(), (keys[at:at + q.CONTROL_BATCH * 10],))
+        if found:
+            database, job = found[0]["database"], found[0]["job"]
             raise HTTPException(409, f"database {database} is in the deleted ingestion job {job}, which is kept until "
                                      f"it is purged: Restore {job}, or Delete now to purge it, then create this job")
-        raise HTTPException(409, f"database {database} is in the ingestion job {job} already: a database's tables stay "
-                                 "in one job, so leave it out of this one, or add tables to that job")
+    _raise_for_shared(_shared_verdict(rows, settings), confirm_shared)
 
 
 def _taken_group_errors(name: str, servers: Iterable[str], taken: Iterable[str]) -> List[str]:
@@ -5970,7 +6254,8 @@ def _prepared_already(body: NewJobRequest) -> tuple:
 
 def _create_preparing(body: NewJobRequest, request: Request, database_lines: bool = False) -> dict:
     """Create at once (decision B): the checks that need only names and settings (the job's name, its targets, its
-    group names free, no database already in another job, live or deleted, the source and scope rules, the right to run
+    group names free, no database in a deleted job, a database another live job reads only as the shared-database rule
+    allows (confirmed), the source and scope rules, the right to run
     what it starts when its schedule is to be on, and the right to run discovery when the file has database-only lines,
     which a discovery run reads), then in one transaction the job (paused, no groups, its record Preparing), what it
     was chosen from with its drafts claimed, and its prepare task, which is started after the commit. Answers with the
@@ -6007,7 +6292,7 @@ def _create_preparing(body: NewJobRequest, request: Request, database_lines: boo
         _refuse_run_of(_require(jobs.DISCOVER_JOB_ID, "discovery"), request)
     options = _create_options(body)
     _refuse_unknown_node_types(sch.own_cluster({"options": options}))
-    _refuse_owned_databases(chosen)
+    _refuse_owned_databases(chosen, settings, body.confirm_shared)
     if database_lines:
         selected = _selected(selection)
     else:
@@ -6365,7 +6650,8 @@ def _prepare_write(sid: int, task_id: int, owner: str, held: threading.Event, jo
         except HTTPException as e:
             raise PrepareRefused(e)
 
-    chunk_job = ChunkJob(sid=sid, name=job["name"], user=source.maker, batch=uuid.uuid4().hex[:12],
+    # Create asked about the databases another job reads before it recorded the job (_refuse_owned_databases).
+    chunk_job = ChunkJob(sid=sid, name=job["name"], user=source.maker, batch=uuid.uuid4().hex[:12], confirm_shared=True,
                          cadence_minutes=int(job["cadence_minutes"]), timezone=job["timezone"], offsets=offsets,
                          task_id=task_id, stages=stages, connection=source.connection, check=check)
 
@@ -6579,6 +6865,8 @@ def update_schedule(sid: int, body: ScheduleBody, request: Request):
             for c in added:
                 cur.execute(q.insert_member_sql(), (int(sid), c, offs[c]))
                 _log(cur, user, "schedule_edit", None, c, f"{s['name']}.members", None, c, batch=batch)
+            # A group with tables brings its databases and targets along.
+            _refuse_shared_targets(cur, added, confirm_shared=body.confirm_shared)
             for c, m in active.items():
                 if c in offs and int(m["offset_minutes"]) != offs[c]:
                     cur.execute(q.update_member_offset_sql(), (offs[c], m["id"]))
@@ -6770,12 +7058,14 @@ def purge_schedule(sid: int, request: Request):
 
 
 @app.post("/api/schedules/{sid}/restore")
-def restore_schedule(sid: int, request: Request):
+def restore_schedule(sid: int, request: Request, confirm_shared: bool = False):
     """Restore a deleted job that its purge has not reached. It is live again, paused (nothing runs until it is
     resumed),
     with the members its Delete removed; members removed before the delete stay removed, and its groups' tables and
     state are as they were. Refused when its name is taken, one of its groups is now in another live job, a live job
-    shares a database or target table with it, or its purge is going or has finished."""
+    writes one of its target tables, a live job reads one of its databases and writes to one of its catalog.schema
+    targets (the shared-database rule; a live job that reads one of its databases into other targets is no reason),
+    or its purge is going or has finished."""
     user = _user(request)
     s, _ = _load_schedule(sid)
     _refuse_job(s, request, "delete")
@@ -6798,6 +7088,7 @@ def restore_schedule(sid: int, request: Request):
         cur.execute(q.restore_schedule_sql(), (int(sid),))
         if cur.rowcount != 1:
             raise HTTPException(409, PURGED)
+        _refuse_shared_targets(cur, restored, confirm_shared=confirm_shared)
         _log(cur, user, "schedule_restore", None, None, s["name"], None, None)
         _touch(cur, user, [sid])
     synced = _sync(sid, user)
@@ -6807,8 +7098,8 @@ def restore_schedule(sid: int, request: Request):
 
 def _restore_refusals(cur, job: dict, groups: List[str]) -> None:
     """Inside a Restore's transaction: refuse when a live job has the deleted job's name, holds one of its groups now,
-    or
-    has a database or a target table in common with them. Each message says what to change first."""
+    or writes one of their target tables. A database they share with a live job is checked once the job is live again
+    (_refuse_shared_targets). Each message says what to change first."""
     cur.execute(q.live_name_taken_sql(), (job["name"], int(job["id"])))
     if cur.fetchall():
         raise HTTPException(409, f"another ingestion job is already named {job['name']}: rename or delete it, then "
@@ -6822,14 +7113,12 @@ def _restore_refusals(cur, job: dict, groups: List[str]) -> None:
         raise HTTPException(409, f"ingestion group {group} is now in the ingestion job {holder}: take it out "
                                  f"of that job, "
                                  "then restore this one")
-    cur.execute(q.restore_conflicts_sql(), (groups, groups))
+    cur.execute(q.restore_conflicts_sql(), (groups,))
     conflicts = cur.fetchall()
     if conflicts:
-        kind, item, holder = conflicts[0]
-        what = f"database {item}" if kind == "database" else f"target table {item}"
-        raise HTTPException(409, f"{what} is also read or written by the live ingestion job {holder}: move one "
-                                 f"of the two "
-                                 "jobs apart, then restore this one")
+        item, holder = conflicts[0]
+        raise HTTPException(409, f"target table {item} is also written by the live ingestion job {holder}: move one "
+                                 "of the two jobs apart, then restore this one")
 
 
 def _delete_refusal(job: dict, groups: List[str], user: str) -> Optional[str]:
@@ -7288,8 +7577,10 @@ def _rediscover(sid: int, report=lambda **fields: None) -> dict:
                                    "ct", job_rows, _sizing(None, job), taken, unity_catalog=_unity_catalog(job))
             if plan["errors"]:
                 raise HTTPException(422, {"errors": plan["errors"]})
+            # Re-discovery can't ask: a database another job reads joins under the job's own whole-server choice,
+            # and a clash refuses as for any write.
             written, warnings = _write_planned_tables(cur, job, plan, user, batch, skip_taken=True,
-                                                      reader=job.get("created_by") or "")
+                                                      reader=job.get("created_by") or "", confirm_shared=True)
             if written:
                 _touch(cur, user, [sid])
             outcome["added"] = len(written)
