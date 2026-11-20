@@ -367,13 +367,13 @@ cryptography==50.0.2 \
     --hash=sha256:fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb \
     --hash=sha256:fdd28f912fccfec1846a94e2e1e8f9b0012f557f0c46fe4f3eb0d7a87afcf90b
     # via google-auth
-databricks-sdk==0.161.0 \
-    --hash=sha256:6f76bfa7dd269625ca9123ea0df1c4fd40943c7cf253bbce8d08a5a19d41f178 \
-    --hash=sha256:9a4dc7162fa8a20fc6a79e34f92733675811b6f94d4a7967164d3e2993cab0c0
+databricks-sdk==0.164.0 \
+    --hash=sha256:30ba531acc6c33655ea3c8423661b5d7cdd42fb76eec187714c6924405ebdd58 \
+    --hash=sha256:bf5d6000703af299f67c9688c86a7ec2a6e64bdabf106dc031e6f210aa264f74
     # via -r app/src/requirements.txt
-fastapi==0.162.0 \
-    --hash=sha256:3785963de305dd09912426cb81f2d230fce98ab3521cdfe97265c8d14983128c \
-    --hash=sha256:6a22c1e2e6e32e0633ee7e170f00009a29b8228b16feb219ee42f32fd8d88a8f
+fastapi==0.162.3 \
+    --hash=sha256:2db4a90df7bce3814a0b1003e8cf3f4f0b3d2937cffb04f623672b14a45ef750 \
+    --hash=sha256:3efb8dfa3ca546d0b4da484cd19ff97e3ca0a67d34a6fefb05a45faabcb141ed
     # via -r app/src/requirements.txt
 google-auth==2.62.1 \
     --hash=sha256:015399a5abde39033c69404cc1c079e6d4c2de2993e164c9f4eac6e5376ad72b \

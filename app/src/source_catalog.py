@@ -73,13 +73,18 @@ ROWVERSION_SQL_TYPES = ", ".join(f"'{name}'" for name in sorted(ROWVERSION_TYPES
 UNREADABLE_COLUMN_SQL = (f"(ISNULL(LOWER(TYPE_NAME(c.system_type_id)), '') IN ({UNSUPPORTED_SQL_TYPES}) "
                          f"OR ISNULL(LOWER(TYPE_NAME(c.user_type_id)), '') IN ({UNSUPPORTED_SQL_TYPES}) "
                          "OR CHARINDEX(',', c.name) > 0)")
-# One row per user table. remote_query reads this text as a subquery, so there is no WITH and no top-level ORDER BY
+# One row per user table, with its size as the engine's discovery.TABLES_SQL reads it (allocated pages, in MB), so a
+# discovery through a UC connection gets the size the partitioning recommendation needs (queries.recommended_partitioning).
+# remote_query reads this text as a subquery, so there is no WITH and no top-level ORDER BY
 # (ORDER BY inside a FOR XML or TOP subquery is fine). The lists use STUFF with FOR XML PATH, TYPE read back by
 # .value, so a name with & < or > comes back as written on every SQL Server version.
 TABLE_SUMMARY_SQL = (
     "SELECT s.name AS sch, t.name AS tbl, "
     "CAST(ISNULL((SELECT SUM(p.rows) FROM sys.partitions p "
     "  WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)), 0) AS BIGINT) AS row_count, "
+    "CAST(ISNULL((SELECT SUM(a.total_pages) * 8 / 1024.0 FROM sys.partitions p "
+    "  JOIN sys.allocation_units a ON a.container_id = p.partition_id "
+    "  WHERE p.object_id = t.object_id), 0) AS DECIMAL(18, 2)) AS size_mb, "
     "CAST(CASE WHEN ct.object_id IS NULL THEN 0 ELSE 1 END AS INT) AS ct_enabled, "
     "STUFF((SELECT ', ' + c.name FROM sys.columns c "
     f"  WHERE c.object_id = t.object_id AND NOT {UNREADABLE_COLUMN_SQL} "
@@ -119,12 +124,12 @@ TABLE_SUMMARY_SQL = (
 
 def assemble_summary(rows) -> List[dict]:
     """One recommendation per table from TABLE_SUMMARY_SQL's rows, with the keys, values and sort order of
-    discovery.assemble. size_mb is None: the summary doesn't read table sizes. Values may come back as text (a SQL
-    warehouse returns every value as a string), so numbers and flags are read through int()."""
+    discovery.assemble. Values may come back as text (a SQL warehouse returns every value as a string), so numbers and
+    flags are read through int() and float()."""
     out = []
     for row in rows:
         out.append({"src_schema": row["sch"], "src_table": row["tbl"], "row_count": int(row["row_count"] or 0),
-                    "size_mb": None, "ct_enabled": bool(int(row["ct_enabled"] or 0)),
+                    "size_mb": float(row.get("size_mb") or 0), "ct_enabled": bool(int(row["ct_enabled"] or 0)),
                     **_recommend_summary_row(row)})
     return sorted(out, key=lambda row: (row["src_schema"].lower(), row["src_table"].lower()))
 
