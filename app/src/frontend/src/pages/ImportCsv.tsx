@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Row } from "../api";
-import { Cols, ConfirmButton, Cut, CutCopy, ErrorBox, PageHead, Section, Tag, ToastOn, WriteWarnings, fmtInt, oneLine, plural } from "../components";
+import { Cols, ConfirmButton, FullAppendNote, Cut, CutCopy, ErrorBox, PageHead, Section, Tag, ToastOn, WriteWarnings, fmtInt, oneLine, plural } from "../components";
 import { groupsRefusal, usePermissions } from "../permissions";
 
 /** The preview's lines as a job's runs list keeps its columns: the problems take the spare width. */
@@ -97,6 +97,7 @@ export default function ImportCsv() {
                 </label>
               );
             })}
+            <FullAppendNote loadType={shown("load_type")} writeMode={shown("write_mode")} many className="impact wide" />
           </form>
         )}
       </Section>

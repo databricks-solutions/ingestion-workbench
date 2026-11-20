@@ -666,6 +666,17 @@ export function WriteWarnings({ warnings }: { warnings?: Row[] | null }) {
   );
 }
 
+/** What a full reload in append mode does, where the pair is chosen (job form, Add table, Import CSV): every run adds a
+ * whole copy of the table, so its target grows by the table's size each run; merge replaces the rows. Shown only for
+ * that pair (queries.FULL_APPEND_NOTE says the same in the Tables edit preview, planner.full_append_warning each run). */
+export function FullAppendNote({ loadType, writeMode, many = false, className = "impact" }:
+    { loadType: unknown; writeMode: unknown; many?: boolean; className?: string }) {
+  if (loadType !== "full" || writeMode !== "append") return null;
+  return <p className={className}>{many
+    ? "Full-reload tables in append mode add a whole copy of each table every run, so their target tables grow by the tables' size each run. Merge replaces the rows instead."
+    : "A full reload in append mode adds a whole copy of the table every run, so its target table grows by the table's size each run. Merge replaces the rows instead."}</p>;
+}
+
 export function Notice({ tone = "info", children }: { tone?: "info" | "ok" | "warn" | "bad"; children: ReactNode }) {
   return <div className={`alert ${tone}`}>{children}</div>;
 }

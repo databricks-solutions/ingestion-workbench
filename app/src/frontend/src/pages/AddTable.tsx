@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { SOURCE_TYPE_NAMES } from "../cells";
-import { PageHead, ErrorBox, Section, ToastOn, WriteWarnings } from "../components";
+import { FullAppendNote, PageHead, ErrorBox, Section, ToastOn, WriteWarnings } from "../components";
 import { groupsRefusal, usePermissions } from "../permissions";
 
 // The values in words, as the Edit view names them.
@@ -78,6 +78,7 @@ export default function AddTable() {
               {f.help && <span className="muted small">{f.help}</span>}
             </label>
           ); })}
+          <FullAppendNote loadType={row.load_type} writeMode={row.write_mode} className="impact wide" />
           {locked && <p className="wide muted small">{locked}.</p>}
           <div className="wide"><button className="primary" disabled={add.isPending || !!locked}>Add table</button></div>
         </form>
