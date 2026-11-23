@@ -6,8 +6,9 @@ the operations app with its SQL warehouse, login scope and grant job (`app/resou
 ingestion job runs on job clusters; the setup, check, cluster-copies, delete and grant jobs on serverless; discovery
 on the bundle's single-node `lakefed_ingest utility` cluster. One `databricks bundle deploy` creates everything,
 applies the Lakebase schema, starts the app and gives it its access, and is idempotent for resources the bundle owns.
-This page covers the settings and the steps the bundle can't do. Run all commands from the repo root. (The legacy
-version is a separate bundle in `job_orchestration/`; see [`../job_orchestration/README.md`](../job_orchestration/README.md).)
+This page covers the settings and the steps the bundle can't do. Run all commands from the repo root. (The job
+orchestration version, a separate bundle in `job_orchestration/`, is being retired and is removed from the repository
+on 15 January 2027; see [Moving off the job orchestration version](#moving-off-the-job-orchestration-version).)
 
 ## Before you start
 
@@ -383,19 +384,95 @@ serverless network connectivity to the servers; see [Compute](#compute-for-the-s
 
 ## Upgrading
 
-### Upgrading from an earlier release
+### Moving off the job orchestration version
 
-The original version moved from the repo root to [`job_orchestration/`](../job_orchestration/README.md),
-unchanged and with the same bundle name and uuid, so deploying it **from `job_orchestration/`** updates your
-existing jobs in place. The repo root is now the root implementation, a different bundle (`lakefed_ingest_v2`): a
-`databricks bundle deploy` run from the root, including CI or scripts written for the old layout, doesn't touch
-your existing jobs, but creates the root implementation's resources, including a billable Lakebase instance. Update
-deploy automation to `cd job_orchestration` first. If you deployed a preview of the root implementation, follow
-[Upgrading a preview deployment](#upgrading-a-preview-deployment) before deploying either version.
+The job orchestration version (`job_orchestration/`, bundle `lakefed_ingest`: Jobs `for_each` tasks on a SQL
+warehouse, a Delta control table, Lakehouse Federation or `remote_query`) is being retired. **It is removed from the
+repository on 15 January 2027.**
+
+- **Until then**, every `databricks bundle` command of that bundle (validate, deploy, run, destroy) refuses unless
+  you add `--var legacy_migrating=true`, so no new set-up starts on it. Jobs you already deployed keep running on
+  their schedules, and a deploy or run with the setting works as before while you move.
+- **After that date**, the last copy stays deployable from the tag `job-orchestration-final`
+  (`git checkout job-orchestration-final`, then the same commands from `job_orchestration/`, with the setting). It
+  gets no further changes.
+- **Deploy it from `job_orchestration/`.** It moved there from the repository root, unchanged and with the same
+  bundle name and uuid, so a deploy from `job_orchestration/` (with the setting) updates your existing jobs in place.
+  A deploy from the root, including CI or scripts written for the old layout, doesn't touch them: the root is a
+  different bundle (`lakefed_ingest_v2`) that creates its own resources, including a billable Lakebase instance. So
+  deploy automation for the old jobs must `cd job_orchestration` and add the setting until you have moved. If you
+  deployed a preview of the root implementation, follow
+  [Upgrading a preview deployment](#upgrading-a-preview-deployment) before deploying either version.
+- **The check is a bundle script** (`experimental.scripts.postinit` in `job_orchestration/databricks.yml`), which
+  the CLI runs with bash, or sh. It runs after the CLI has signed in and resolved the bundle's lookups (the dev
+  target's `warehouse` lookup), so an error there shows first. On Windows, run the commands from Git Bash or WSL: the
+  CLI falls back to `cmd.exe` when it finds neither bash nor sh, and the check then refuses even with the setting.
+
+To move a workload:
+
+1. **Check that the default version covers it.** It reads SQL Server (Change Tracking, a watermark column, or a full
+   reload, each with an optional partitioned first copy) and Oracle, PostgreSQL and MySQL (full reload). It does not
+   yet read Redshift, Synapse or IBM Db2, take watermark loads from sources other than SQL Server, run on a SQL
+   warehouse alone, or turn on Iceberg reads for its tables. If you need one of these, stay on the job orchestration
+   version for now and [open an issue](https://github.com/databricks-solutions/ingestion-workbench/issues/new) so
+   it can be planned.
+2. **Deploy the default version** from the repository root, as in [2. Deploy](#2-deploy).
+3. **Register your tables in the operations app.** New ingestion job > Add tables: discover them through the Unity
+   Catalog connection you already use, or import a CSV. To list what can move from your control table (default
+   `lakefed_ingest.default.control`):
+
+   ```sql
+   select coalesce(src_connection, '<connection of ' || src_catalog || '>') as connection,
+          src_database, src_catalog, src_schema, src_table, nullif(select_list, '*') as select_list,
+          array_join(primary_key, ',') as primary_key,
+          case when load_type = 'incremental' then watermark_col_name end as cursor_column,
+          case when load_type = 'incremental' then 'cursor' else 'full' end as load_type
+   from lakefed_ingest.default.control
+   where task_enabled
+     and src_type in ('sqlserver', 'oracle', 'postgresql')
+     and not (load_type = 'incremental' and src_type <> 'sqlserver')
+   order by connection, src_database, src_schema, src_table
+   ```
+
+   The query leaves out the rows the default version can't take yet: Redshift, Synapse and Db2 sources, and
+   watermark loads from Oracle or PostgreSQL. Those stay on the job orchestration version (step 1). Then make one
+   CSV per connection, one ingestion job each:
+   - **The connection.** A row read through `remote_query` names it in `src_connection`. A row read through
+     Lakehouse Federation (`use_remote_query` false) reads through its foreign catalog (`src_catalog`): the
+     connection is the one that catalog uses (Catalog Explorer shows it under the catalog's details), and the
+     database is the one the catalog points at. Fill in `src_database` for those rows.
+   - **The file.** Keep `src_database`, `src_schema`, `src_table`, `select_list`, `primary_key`, `cursor_column` and
+     `load_type`; drop `connection` and `src_catalog`. The app takes the connection you pick, and the file must not
+     have a connection column.
+   - **Upload it** after picking that connection, and check the preview. The default version needs named columns, so
+     a `select_list` of `*` comes out blank: name the columns, or add those tables through Discover, which lists
+     them. A SQL Server table with Change Tracking on can take `ct` instead of `cursor`, which also catches deletes;
+     discovery recommends it.
+4. **Write to a new schema first.** Set the new job's target catalog and schema (How it writes) to ones the old jobs
+   don't write, so the two can be compared. The first run copies each table in full. After that, `ct` and `cursor`
+   tables read only their changes, and each `full` table is read again in full on every run, as before.
+5. **Switch over.** Once the new tables are current (the job's page shows no late or failing tables) and match the
+   old ones, point readers at them, then remove the old jobs from `job_orchestration/`. Check first what a destroy
+   would delete:
+
+   ```bash
+   cd job_orchestration
+   databricks bundle plan -t <target> -p <profile> --var legacy_migrating=true
+   databricks bundle summary -t <target> -p <profile> --var legacy_migrating=true   # every resource the state holds
+   databricks bundle destroy -t <target> -p <profile> --var legacy_migrating=true
+   ```
+
+   The summary should list only the four jobs (`lakefed_ingest_controller`, `lakefed_ingest_copy` and the two
+   `lakefed_ingest_copy_partitioned_*`). If it lists anything else, such as a preview build's Lakebase instance,
+   catalog, secret scope or `lakefed_ingest_mt_*` jobs, don't destroy: follow
+   [Upgrading a preview deployment](#upgrading-a-preview-deployment) first, or those go too, with their data. A
+   destroy leaves the control table and the Delta tables the jobs wrote, which you can drop when you no longer
+   need them.
 
 ### Upgrading an existing deployment
 
-Pull and deploy. The deploy's setup run migrates the schema before the new app starts. The database records its
+Pull and deploy. (The app's per-server read cap is set only by the `reads_cap` variable, which the bundle passes as
+`READS_CAP`; an app setting of the older name `READS_START_CAP` is no longer read.) The deploy's setup run migrates the schema before the new app starts. The database records its
 schema version (`schema_version`), and an ingestion run whose code needs a newer one also migrates the schema before it
 starts, in one transaction, while runs
 of other collections wait for it. If the migration fails (for example, existing rows break a new constraint),
@@ -483,14 +560,15 @@ Earlier preview builds kept their Lakebase resources in the `lakefed_ingest` bun
 Move them to this bundle before deploying either version:
 
 ```bash
-# 1. Release them from the old bundle state (run from job_orchestration/; resource keys from the old config)
+# 1. Release them from the old bundle state (run from job_orchestration/; resource keys from the old config).
+#    The job orchestration bundle refuses any command without --var legacy_migrating=true (see above).
 cd job_orchestration
-databricks bundle deployment unbind mt_lakebase         -t <target>
-databricks bundle deployment unbind mt_lakebase_catalog -t <target>
-databricks bundle deployment unbind mt_secret_scope     -t <target>
-databricks bundle deployment unbind lakefed_ingest_mt_sweep -t <target>
-databricks bundle deployment unbind lakefed_ingest_mt_setup -t <target>
-databricks bundle plan -t <target>        # must show 0 to delete
+databricks bundle deployment unbind mt_lakebase             -t <target> --var legacy_migrating=true
+databricks bundle deployment unbind mt_lakebase_catalog     -t <target> --var legacy_migrating=true
+databricks bundle deployment unbind mt_secret_scope         -t <target> --var legacy_migrating=true
+databricks bundle deployment unbind lakefed_ingest_mt_sweep -t <target> --var legacy_migrating=true
+databricks bundle deployment unbind lakefed_ingest_mt_setup -t <target> --var legacy_migrating=true
+databricks bundle plan -t <target> --var legacy_migrating=true        # must show 0 to delete
 cd ..
 ```
 

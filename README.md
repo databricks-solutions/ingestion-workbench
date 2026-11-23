@@ -9,6 +9,12 @@ estates of many databases: thousands of source databases and hundreds of thousan
 **operations app**, deployed with the rest, lets you find the tables on a source, make ingestion jobs from them and watch them run, without
 writing SQL.
 
+> **The job orchestration version is being retired.** The original version in `job_orchestration/` (Jobs `for_each`
+> tasks on a SQL warehouse, through Lakehouse Federation) is removed from this repository on **15 January 2027**.
+> Until then its bundle refuses new deployments unless you add `--var legacy_migrating=true`; jobs already deployed
+> keep running. [Moving off the job orchestration version](docs/deploy.md#moving-off-the-job-orchestration-version)
+> says how to move your tables to this version.
+
 ## How it works
 
 ![How the parts fit: sources are read by the check and ingest jobs, which write Delta tables and record their state in Lakebase; the app reads table lists through its SQL warehouse and writes the control rows](docs/images/how-it-fits.svg)
