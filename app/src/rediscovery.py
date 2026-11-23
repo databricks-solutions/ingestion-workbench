@@ -5,7 +5,7 @@ databases, or some tables. When the job's schedule has a re-discovery hour (opti
 discovery runs again over the same servers each day, and the rules add what they allow:
 
 - a whole server (or every database matching its filter) adds every new database matching the filter, with all of
-  its tables;
+  its tables, but never one of the databases unticked under it when the job was chosen (scope excluded_database);
 - a whole database adds its new tables;
 - specific tables add nothing.
 
@@ -222,11 +222,22 @@ def table_key(server: str, database: str, schema: str, table: str) -> tuple:
     return tuple(str(part or "").lower() for part in (server_key(server), database, schema, table))
 
 
+def unticked_under(server_part: dict, parts: List[dict]) -> Set[tuple]:
+    """The databases (server key, lower-case name) unticked under one whole-server part: the excluded_database parts
+    of its server written with it. One Create or Add tables writes its parts in one transaction, so they share its
+    created_at; a whole server chosen again later without them takes those databases again."""
+    server = server_key(server_part["server"])
+    return {(server, str(p["src_database"]).lower()) for p in parts
+            if p["scope"] == "excluded_database" and server_key(p["server"]) == server
+            and p.get("created_at") == server_part.get("created_at")}
+
+
 def wanted(parts: List[dict], found: List[dict], statuses: List[dict], job_rows: List[dict],
            excluded: Set[tuple] = frozenset()) -> dict:
     """What the rules add to a job, given what the re-discovery found now.
 
-    parts: the job's selection parts (scope, server, src_database, filter). found: the tables the discovery found
+    parts: the job's selection parts (scope, server, src_database, filter; a database unticked under a whole server is
+    a part of scope excluded_database, and nothing of it is added or reported). found: the tables the discovery found
     (server, src_database, src_schema, src_table, fields). statuses: each database the discovery read (server,
     src_database, status 'ok' or 'failed', error). job_rows: the job's control rows now. excluded: the tables the job
     removed (table keys): they are not added again, and a database whose only new tables are excluded is not new.
@@ -247,9 +258,11 @@ def wanted(parts: List[dict], found: List[dict], statuses: List[dict], job_rows:
         server = server_key(part["server"])
         if part["scope"] == "server":
             needle = str(part.get("filter") or "").lower()
+            left_out = unticked_under(part, parts)
             for row in found:
                 database = str(row["src_database"])
-                if server_key(row["server"]) != server or needle not in database.lower():
+                if (server_key(row["server"]) != server or needle not in database.lower()
+                        or (server, database.lower()) in left_out):
                     continue
                 key = table_key(row["server"], database, row["src_schema"], row["src_table"])
                 if (server, database.lower()) in have_databases or key in excluded:
@@ -275,7 +288,9 @@ def wanted(parts: List[dict], found: List[dict], statuses: List[dict], job_rows:
             vanished.append(f"{server}/{row['src_database']}.{row['src_schema']}.{row['src_table']}")
     errors = [{"database": f"{s['server']}/{s['src_database']}", "error": s.get("error") or "could not be read"}
               for s in statuses if s["status"] == "failed"
-              and (server_key(s["server"]) in whole_servers
+              and (any(server_key(p["server"]) == server_key(s["server"])
+                       and (server_key(s["server"]), str(s["src_database"]).lower()) not in unticked_under(p, parts)
+                       for p in parts if p["scope"] == "server")
                    or (server_key(s["server"]), str(s["src_database"]).lower()) in database_parts)]
     return {"add": [add[key] for key in sorted(add)], "new_databases": sorted(new_databases),
             "vanished": sorted(set(vanished)), "errors": errors}

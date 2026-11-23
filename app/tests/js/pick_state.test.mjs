@@ -2,7 +2,8 @@
 // frontend_pick_test.py runs this file from pytest.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { accessOf, countsText, likeContaining, readable, selectionCounts } from "../../src/frontend/src/pages/pickState.ts";
+import { accessOf, countsText, coveredByServer, databaseTickUnderServer, likeContaining, noWholeServer, readable, selectionCounts,
+  serverRowPick, serverTick } from "../../src/frontend/src/pages/pickState.ts";
 
 test("a database filter becomes the SQL Server LIKE pattern for names containing it, its wildcards taken literally", () => {
   assert.equal(likeContaining(""), null);
@@ -54,4 +55,49 @@ test("a database the login can't open is never read: only the open and the not y
   const seen = { a: { open: true }, b: { open: false }, c: undefined, d: { open: null } };
   assert.deepEqual(readable(["a", "b", "c", "d"], seen), ["a", "c", "d"]);
   assert.deepEqual(readable(["b"], seen), []);
+});
+
+test("the whole server less a database: unticking one keeps the rest, and the server row shows as chosen in part", () => {
+  const whole = serverTick(noWholeServer, "", "none");
+  assert.deepEqual(whole, { on: true, filter: "", excluded: [] });
+  assert.equal(serverRowPick(whole, "", false), "all");
+  const less = databaseTickUnderServer(whole, "lfc_test_002");
+  assert.deepEqual(less, { on: true, filter: "", excluded: ["lfc_test_002"] });
+  assert.equal(coveredByServer(less, "lfc_test_002"), false);
+  assert.equal(coveredByServer(less, "LFC_ENG_001"), true, "every other database is still the server's");
+  assert.equal(serverRowPick(less, "", false), "part");
+  const more = databaseTickUnderServer(less, "lfc_test_003");
+  assert.deepEqual(more.excluded, ["lfc_test_002", "lfc_test_003"]);
+});
+
+test("ticking a database unticked under the server takes it back, in any case of its name", () => {
+  const less = { on: true, filter: "", excluded: ["lfc_test_002"] };
+  assert.deepEqual(databaseTickUnderServer(less, "LFC_TEST_002"), { on: true, filter: "", excluded: [] });
+});
+
+test("a database the whole server isn't over takes its own tick", () => {
+  assert.equal(databaseTickUnderServer(noWholeServer, "lfc_eng_001"), null);
+  assert.equal(databaseTickUnderServer({ on: true, filter: "eng", excluded: [] }, "lfc_test_001"), null);
+});
+
+test("the server row in part from databases unticked under it gets them back, and ticked again it is unticked", () => {
+  const less = { on: true, filter: "", excluded: ["lfc_test_002", "lfc_eng_009"] };
+  const shownTestOnly = serverTick(less, "test", serverRowPick(less, "test", false));
+  assert.deepEqual(shownTestOnly, { on: true, filter: "", excluded: ["lfc_eng_009"] }, "the whole server stays, filter and all");
+  const all = serverTick(less, "", serverRowPick(less, "", false));
+  assert.deepEqual(all, { on: true, filter: "", excluded: [] });
+  assert.equal(serverRowPick(all, "", false), "all");
+  assert.deepEqual(serverTick(all, "", "all"), { on: false, filter: "", excluded: [] });
+});
+
+test("a database unticked out of the page's sight leaves the row ticked for the databases the page shows", () => {
+  const less = { on: true, filter: "", excluded: ["lfc_test_002"] };
+  assert.equal(serverRowPick(less, "eng", false), "all");
+});
+
+test("the whole server's count leaves out each database unticked under it, and its tables once they are counted", () => {
+  const counts = selectionCounts({ matched: 201, closed: 0, unknown: 0, tables: 100_500, excluded: [500] }, [], []);
+  assert.equal(countsText(counts, 201), "Chosen: 200 of 201 databases, 100,000 tables");
+  const counting = selectionCounts({ matched: 201, closed: 0, unknown: 0, tables: 100_500, excluded: [null] }, [], []);
+  assert.equal(countsText(counting, 201), "Chosen: 200 of 201 databases");
 });

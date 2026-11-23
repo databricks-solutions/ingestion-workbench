@@ -89,7 +89,7 @@ def test_a_database_line_takes_its_databases_table_rows_whatever_is_picked(monke
         if sql == q.upload_database_lines_sql():
             return [{"line": 3, "src_database": "eng_001", "fields": {"src_connection": "sql_a", "src_database": "eng_001"}}]
         if sql == q.selected_rows_page_sql("upload"):
-            taken = q.selection_key("sql_a", "eng_001") in params[3]
+            taken = q.selection_key("sql_a", "eng_001") in params[4]
             return [_table_row(2, "eng_001", "t1", "id")] if taken else []
         return []
 

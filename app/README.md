@@ -203,8 +203,9 @@ are the read's own `discovery` and `discovered_table` rows, marked `draft` in `l
 - **A database un-ticked** before Create leaves the draft (`POST /api/discoveries/{id}/drop`, by the person who started
   it): its row is marked `dropped` in `listing` (the app has no DELETE), its statement still going is cancelled, and
   it counts nowhere: not in the progress, not in Create's wait, and not among the databases that couldn't be read.
-  Ticked again, it comes back; one read already isn't read again. A whole-server read's databases aren't dropped one
-  by one: changing its filter discards that draft and starts another. Create takes the dropped rows with the rest of
+  Ticked again, it comes back; one read already isn't read again. A database unticked under a ticked whole server
+  leaves the server's draft the same way (the server row then shows as chosen in part), and the job never takes it;
+  changing the server's filter discards that draft and starts another. Create takes the dropped rows with the rest of
   the draft, so the purge never takes a part of a job's discovery.
 - **Create** is enabled throughout. Pressed early, it records the job at once and the job's prepare task waits for
   the rest of the read, then writes (see A new job's preparation). A database that couldn't be read is set aside on
@@ -329,7 +330,7 @@ then each database's tables); one read by host and password runs the discovery j
 
 | The job was chosen as | Re-discovery adds |
 |---|---|
-| a whole server, with its filter | each new database matching the filter, with all its tables. New tables of a database the job already has are not added |
+| a whole server, with its filter | each new database matching the filter, with all its tables, except the databases unticked under the server when the job was chosen. New tables of a database the job already has are not added |
 | a whole database | its new tables |
 | specific tables | nothing |
 

@@ -51,10 +51,10 @@ def test_a_choice_read_to_the_end_has_nothing_to_wait_for(monkeypatch):
 
 
 def test_a_whole_server_read_leaves_out_a_database_the_login_cant_open_and_names_any_other_failure(monkeypatch):
-    rows = [{"src_database": "eng_007", "error": "Cannot open database \"eng_007\" requested by the login.",
-             "whole_server": True},
-            {"src_database": "eng_009", "error": "Login failed for user 'reader'.", "whole_server": False},
-            {"src_database": "eng_011", "error": "Query timed out\nmore", "whole_server": True}]
+    rows = [{"server": "sql_a", "src_database": "eng_007",
+             "error": "Cannot open database \"eng_007\" requested by the login.", "whole_server": True},
+            {"server": "sql_a", "src_database": "eng_009", "error": "Login failed for user 'reader'.", "whole_server": False},
+            {"server": "sql_a", "src_database": "eng_011", "error": "Query timed out\nmore", "whole_server": True}]
     _lakebase(monkeypatch, [_reads(failed=3)], rows)
     reading = main._draft_reading(SELECTION)
     assert reading["left_out"] == 1 and reading["failed"] == 2

@@ -116,17 +116,17 @@ class Unit:
 
 def selection_units(selection, server_database_keys: Iterator[Tuple[str, str]]) -> Iterator[Unit]:
     """The databases a selection takes, in order: each database the whole_server filter matches (given as
-    server_database_keys, from database_pages), then the databases named and the tables named, skipping those the
-    whole server already covers (a database whose name the filter keeps) and naming each database once."""
+    server_database_keys, from database_pages) but those unticked under it, then the databases named and the tables
+    named, skipping those the whole server already covers and naming each database once."""
     seen = set()
     for server, database in server_database_keys:
+        if not selection.server_covers(server, database):
+            continue
         seen.add((server.lower(), database.lower()))
         yield Unit(server, database, True, exact=True)
-    filter_ = str(selection.filter or "").lower()
-    covered = lambda database: bool(selection.whole_server) and filter_ in database.lower()
     for named in selection.databases:
         key = (named.server.lower(), named.database.lower())
-        if key in seen or covered(named.database):
+        if key in seen or selection.server_covers(named.server, named.database):
             continue
         seen.add(key)
         yield Unit(named.server, named.database, True)
@@ -135,7 +135,7 @@ def selection_units(selection, server_database_keys: Iterator[Tuple[str, str]]) 
         for name in named.tables:
             by_database.setdefault((named.server.lower(), named.database.lower(), named.database), set()).add(name.lower())
     for (server, database_lower, database), names in by_database.items():
-        if (server, database_lower) in seen or covered(database):
+        if (server, database_lower) in seen or selection.server_covers(server, database):
             continue
         seen.add((server, database_lower))
         yield Unit(server, database, False, frozenset(names))

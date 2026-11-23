@@ -21,6 +21,9 @@ CASES = [
     ({"on": True, "filter": "eng_0"}, "eng", False, "part"),
     ({"on": True, "filter": "ENG"}, "eng_00", False, "all"),
     ({"on": True, "filter": "eng_0"}, "other", False, "part"),
+    ({"on": True, "filter": "", "excluded": ["eng_002"]}, "", False, "part"),
+    ({"on": True, "filter": "", "excluded": ["eng_002"]}, "eng_00", False, "part"),
+    ({"on": True, "filter": "", "excluded": ["eng_002"]}, "prod", False, "all"),
 ]
 
 
